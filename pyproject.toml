@@ -1,0 +1,9 @@
+[project]
+name = "traffice-agent-project-backend"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.139.0",
+    "python-dotenv>=1.2.2",
+    "uvicorn[standard]>=0.51.0",
+]
