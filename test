@@ -1,0 +1,54 @@
+SIMULATION_PLATFORM_BASE_URL="https://simvis.tsingtransit.com/api"
+SIMULATION_PLATFORM_TOKEN="ecab4e6a13ed6cfe12905d1f7d9e4a31af563804"
+
+$baseUrl = "https://simvis.tsingtransit.com/api"
+$token = "ecab4e6a13ed6cfe12905d1f7d9e4a31af563804"
+
+注册:
+$registerBody = @{
+    username = "xiaoming2"
+    email    = "xiaoming2@example.com"
+    password = "Test123456"
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+    -Method Post `
+    -Uri "http://127.0.0.1:8000/api/v1/auth/register" `
+    -ContentType "application/json; charset=utf-8" `
+    -Body $registerBody
+
+登录:
+$loginBody = @{
+    username = "xiaoming"
+    password = "Test123456"
+}
+
+$loginResponse = Invoke-RestMethod `
+    -Method Post `
+    -Uri "http://127.0.0.1:8000/api/v1/auth/login" `
+    -ContentType "application/x-www-form-urlencoded" `
+    -Body $loginBody
+
+$loginResponse
+
+
+仿真:
+$headers = @{
+    Authorization = "Token $token"
+    Accept        = "application/json"
+}
+---
+$areas = Invoke-RestMethod `
+    -Method Get `
+    -Uri "$baseUrl/datamanager/area/" `
+    -Headers $headers
+
+$areas | ConvertTo-Json -Depth 10
+---
+$simulations = Invoke-RestMethod `
+    -Method Get `
+    -Uri "https://simvis.tsingtransit.com/api/simulation/simulation/?type=offline" `
+    -Headers $headers
+
+$simulations | ConvertTo-Json -Depth 10
+

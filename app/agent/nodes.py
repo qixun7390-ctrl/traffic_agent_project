@@ -1,0 +1,593 @@
+from datetime import datetime
+import json
+from pathlib import Path
+from typing import Any, Literal
+import re
+from app.agent.state import TrafficAgentState
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import Runnable
+
+from app.core.config import settings
+from app.schemas.agent import AgentOperation
+from app.services.llm_service import LLMService
+from langgraph.types import  interrupt
+
+from app.services.simulation_http_client import SimulationPlatformclient
+
+INTENT_SYSTEM_PROMPT = """
+你是交通仿真平台的操作意图分析器。
+
+你只能判断三种 operation：
+
+1. query
+用户想查询、分析、查看某个仿真。
+
+2. create
+用户想创建、启动、新建仿真。
+
+3. delete
+用户想删除、移除某个仿真。
+
+且一次只能返回一种意图，只返回 JSON，不要解释。
+
+返回格式：
+{
+  "operation": "query|create|delete",
+  "reason": "一句话说明判断依据"
+}
+"""
+
+
+QUERY_AGENT_SYSTEM_PROMPT = """
+你是交通仿真查询助手。
+
+你可以使用工具查询仿真信息。
+
+当前可用能力：
+1. 查询仿真运行时长
+2. 查询创建订单数
+3. 查询完成订单数
+
+如果用户问“某个仿真跑多久了、创建多少订单、完成多少订单”，
+你应该分别调用对应工具。
+回答用户时要简洁，说明查询到的关键数字。
+然后如果你已经收到工具返回结果，请直接总结回答用户，不要重复调用同一个工具。
+
+只调用 metrics 中需要的工具。
+如果 metrics 中没有某个指标，不要调用对应工具。
+"""
+
+QUERY_PARAMS_SYSTEM_PROMPT = """
+你是交通仿真查询参数抽取器。
+
+从用户问题中抽取：
+1. simulation_id
+2. metrics
+
+metrics 只能从下面选择：
+- duration
+- created_order_count
+- completed_order_count
+
+如果用户问“跑多久”，选择 duration。
+如果用户问“创建多少订单”，选择 created_order_count。
+如果用户问“完成多少订单”，选择 completed_order_count。
+如果用户问整体情况，可以三个都选。
+
+只返回 JSON，不要解释。
+
+返回格式：
+{
+  "simulation_id": 283,
+  "metrics": ["duration", "created_order_count", "completed_order_count"]
+}
+"""
+
+CREATE_PARAMS_SYSTEM_PROMPT = """
+你是交通仿真创建参数抽取器。
+
+从用户自然语言中抽取创建仿真的参数：
+- name
+- running_time_step
+- description
+- use_random_match
+- use_cost
+
+不要抽取文件路径，文件路径来自系统 attachments。
+
+如果用户没有明确提供：
+- running_time_step 默认 3600
+- description 默认空字符串
+- use_random_match 默认 true
+- use_cost 默认 true
+- name 可以返回 null
+
+只返回 JSON，不要解释。
+
+返回格式：
+{
+  "name": null,
+  "running_time_step": 3600,
+  "description": "",
+  "use_random_match": true,
+  "use_cost": true
+}
+"""
+
+def get_last_user_message(
+    state: TrafficAgentState,
+) -> str:
+    messages = state.get("messages",[])
+
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            return str(message.content)
+
+    return ""
+
+def parse_operation(
+    raw_text: str,
+) -> tuple[AgentOperation | None,str]:
+    try:
+        data = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return None, "LLM返回内容不是合法JSON"
+
+    if not isinstance(data,dict):
+        return None, "LLM返回内容不是JSON对象"
+
+    operation = data.get("operation")
+    reason = data.get("reason", "")
+
+    if operation not in {"query", "create", "delete"}:
+        return None, f"未知operation:{operation}"
+
+    return operation,str(reason)
+
+async def intent_node(
+    state: TrafficAgentState,
+) -> dict[str, Any]:
+    user_message = get_last_user_message(state)
+    if not user_message:
+        return {
+            "error": {
+                "node": "intent_node",
+                "message": "没有找到用户消息"
+            }
+        }
+    llm = LLMService()
+    raw_result = await llm.generate_response(
+        system_prompt = INTENT_SYSTEM_PROMPT,
+        user_message = user_message
+    )
+
+    operation, reason = parse_operation(raw_result)
+
+    if operation is None:
+        return {
+            "error":{
+                "node": "intent_node",
+                "message": reason,
+                "raw_result": raw_result
+            }
+        }
+
+    return {
+        "operation": operation,
+        "audit_events": [
+            {
+                "node": "intent_node",
+                "operation": operation,
+                "reason": reason
+            }
+        ]
+    }
+
+def build_query_agent_node(
+    model_with_tools: Runnable,
+):
+    async def query_agent_node(
+        state: TrafficAgentState,
+    ) -> dict[str, Any]:
+        request_params = state.get("request_params",{})
+
+        messages = [
+            SystemMessage(
+                content=QUERY_AGENT_SYSTEM_PROMPT
+                + "\n\n已抽取参数：\n"
+                + json.dumps(request_params,ensure_ascii=False)
+                + "\n请只调用 metrics 中需要的查询工具"
+            ),
+            *state.get("messages",[])
+        ]
+        response = await model_with_tools.ainvoke(messages)
+        tool_calls = getattr(response,"tool_calls",[]) or []
+        return {
+            "messages": [response],
+            "audit_events": [
+                {
+                    "node": "query_agent_node",
+                    "tool_calls": len(tool_calls)
+                }
+            ],
+        }
+
+    return query_agent_node
+
+async def create_confirmation_node(
+    state: TrafficAgentState,
+) -> dict[str, Any]:
+    pending_action =  {
+        "operation": "create",
+        "summary": "创建仿真需要用户确认后执行",
+        "arguments": state.get("request_params", {})
+    }
+
+    human_decision = interrupt(
+        {
+            "type": "confirmation",
+            "operation": "create",
+            "question": "是否确认创建该仿真?",
+            "pending_action": pending_action,
+        }
+    )
+
+    approved = (
+        bool(human_decision.get("approved"))
+        if isinstance(human_decision, dict)
+        else bool(human_decision)
+    )
+
+    return {
+        "confirmation_status": "approved" if approved else "rejected",
+        "pending_action": pending_action,
+        "audit_events": [
+            {
+                "node": "create_confirmation_node",
+                "status": "approved" if approved else "rejected",
+            }
+        ],
+    }
+
+
+async def delete_confirmation_node(
+    state: TrafficAgentState,
+) -> dict[str, Any]:
+    pending_action = {
+        "operation": "delete",
+        "summary": "删除仿真需要用户确认后执行",
+        "arguments": state.get("request_params", {})
+    }
+
+    human_decision = interrupt(
+        {
+            "type": "confirmation",
+            "operation": "delete",
+            "question": "是否删除该仿真",
+            "pending_action": pending_action
+        }
+    )
+
+    approved = (
+        bool(human_decision.get("approved"))
+        if isinstance(human_decision, dict) else bool(human_decision)
+    )
+
+    return {
+        "confirmation_status": "approved" if approved else "rejected",
+        "pending_action": pending_action,
+        "audit_events": [
+            {
+                "node": "delete_confirmation_node",
+                "status": "approved" if approved else "rejected",
+            }
+        ]
+    }
+
+def route_after_confirmation(
+    state: TrafficAgentState,
+) -> Literal["execute","end"]:
+    if state.get("confirmation_status") == "approved":
+        return "execute"
+    return "end"
+
+async def create_execute_node(
+    state: TrafficAgentState,
+) -> dict[str, Any]:
+    params = state.get("request_params", {})
+    attachments = params.get("attachments", {})
+    suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = params.get("name") or "agent_area"
+
+    area_name = f"{base_name}_{suffix}"
+    simulation_name = f"{base_name}_{suffix}"
+    async with SimulationPlatformclient(
+        base_url=settings.SIMULATION_PLATFORM_BASE_URL,
+        token=settings.SIMULATION_PLATFORM_TOKEN
+    ) as client:
+        area_id = await client.create_area(
+            name=area_name,
+            map_file=Path(attachments["map_file"]),
+            signal_file=Path(attachments["signal_file"]),
+            description=params.get("description", ""),
+            border_file=(
+                Path(attachments["border_file"])
+                if attachments.get("border_file")
+                else None
+            ),
+        )
+        stop_data_id = await client.upload_stop_data(
+            area_id = area_id,
+            name=f"{area_name}_stops",
+            file_path=Path(attachments["stop_file"]),
+            description="Agent uploaded stop data"
+        )
+        order_data_id = await client.upload_order_data(
+            area_id=area_id,
+            stop_data_id=stop_data_id,
+            name=f"{area_name}_stops",
+            file_path=Path(attachments["order_file"]),
+            description="Agent uploaded stop data"
+        )
+        bus_data_id = await client.upload_bus_data(
+            area_id=area_id,
+            name=f"{area_name}_buses",
+            file_path=Path(attachments["bus_file"]),
+            description="Agent uploaded bus data",
+        )
+        simulation_id = await client.create_offline_simulation(
+            name=simulation_name,
+            running_time_step=params.get("running_time_step", 3600),
+            area_id=area_id,
+            stop_data_id=stop_data_id,
+            order_data_id=order_data_id,
+            bus_data_id=bus_data_id,
+            description=params.get("description", ""),
+            use_random_match=params.get("use_random_match", True),
+            use_cost=params.get("use_cost", True),
+        )
+        result = {
+            "area_id": area_id,
+            "stop_data_id": stop_data_id,
+            "bus_data_id": bus_data_id,
+            "order_data_id": order_data_id,
+            "simulation_id": simulation_id
+        }
+        return {
+            "last_result": result,
+            "audit_events": [
+                {
+                    "node": "create_execute_node",
+                    "result": result,
+                }
+            ]
+        }
+
+async def delete_execute_node(
+    state: TrafficAgentState,
+) -> dict[str, Any]:
+    params = state.get("request_params", {})
+    simulation_id = params.get("simulation_id")
+
+    async with SimulationPlatformclient(
+        base_url=settings.SIMULATION_PLATFORM_BASE_URL,
+        token=settings.SIMULATION_PLATFORM_TOKEN,
+    ) as client:
+        platform_response = await client.delete_simulation(
+            simulation_id=simulation_id,
+        )
+
+    result = {
+        "simulation_id": simulation_id,
+        "platform_response": platform_response,
+    }
+
+    return {
+        "last_result": result,
+        "audit_events": [
+            {
+                "node": "delete_execute_node",
+                "result": result,
+            }
+        ],
+    }
+
+def route_by_operation(
+    state: TrafficAgentState
+) -> Literal["query","create","delete","error"]:
+    if state.get("error"):
+        return "error"
+
+    operation = state.get("operation")
+    if operation in {"query","create","delete"}:
+        return operation
+
+    return "error"
+
+def should_continue_query(
+    state: TrafficAgentState,
+) -> Literal["tools","end"]:
+    messages = state.get("messages",[])
+    if not messages:
+        return "end"
+    last_message = messages[-1]
+    tool_calls = getattr(last_message, "tool_calls", None)
+    if tool_calls:
+        return "tools"
+
+    return "end"
+
+def extract_first_positive_int(
+    text: str,
+) -> int | None:
+    match = re.search(r"\d+", text)
+    if not match:
+        return None
+    value = int(match.group())
+    if value <= 0:
+        return None
+    return value
+
+async def extract_query_params_node(
+    state: TrafficAgentState
+) -> dict[str, Any]:
+    user_message = get_last_user_message(state)
+    llm = LLMService()
+    raw_result = await llm.generate_response(
+        system_prompt=QUERY_PARAMS_SYSTEM_PROMPT,
+        user_message=user_message
+    )
+    data = json.loads(raw_result)
+
+    if data is None or not isinstance(data,dict):
+        return {
+            "error": {
+                "node": "extract_query_params_node",
+                "message": "查询参数抽取结果不是合法JSON对象",
+                "raw_result": raw_result,
+            }
+        }
+
+    simulation_id = data.get("simulation_id")
+    metrics = data.get("metrics", [])
+
+    if not isinstance(simulation_id,int) or simulation_id <= 0:
+        return {
+            "error": {
+                "node": "extract_query_params_node",
+                "message": "缺少有效的simulation_id"
+            }
+        }
+
+    allowd_metrics = {
+        "duration",
+        "created_order_count",
+        "completed_order_count",
+    }
+    if not isinstance(metrics,list):
+        metrics = []
+
+    metrics = [
+        metric for metric in metrics if metric in allowd_metrics
+    ]
+
+    if not metrics:
+        metrics = [
+            "duration",
+            "created_order_count",
+            "completed_order_count",
+        ]
+    return {
+        "request_params": {
+            "simulation_id": simulation_id,
+            "metrics": metrics,
+        },
+        "audit_events": [
+            {
+                "node": "extract_query_params_node",
+                "simulation_id": simulation_id,
+                "metrics": metrics
+            }
+        ]
+    }
+
+async def extract_delete_params_node(
+    state: TrafficAgentState,
+) -> dict[str, Any]:
+    user_message = get_last_user_message(state)
+    simulation_id = extract_first_positive_int(user_message)
+
+    if simulation_id is None:
+        return {
+            "error": {
+                "node": "extract_delete_params_node",
+                "message": "删除仿真需要提供 simulation_id",
+            }
+        }
+
+    return {
+        "request_params": {
+            "simulation_id": simulation_id,
+        },
+        "audit_events": [
+            {
+                "node": "extract_delete_params_node",
+                "simulation_id": simulation_id,
+            }
+        ],
+    }
+
+
+async def extract_create_params_node(
+    state: TrafficAgentState,
+) -> dict[str, Any]:
+    user_message = get_last_user_message(state)
+    attachments = state.get("attachments", {})
+
+    llm = LLMService()
+    raw_result = await llm.generate_response(
+        system_prompt=CREATE_PARAMS_SYSTEM_PROMPT,
+        user_message=user_message,
+    )
+
+    data = json.loads(raw_result)
+
+    if data is None:
+        return {
+            "error": {
+                "node": "extract_create_params_node",
+                "message": "创建参数抽取结果不是合法JSON对象",
+                "raw_result": raw_result,
+            }
+        }
+
+    required_files = [
+        "map_file",
+        "signal_file",
+        "stop_file",
+        "order_file",
+        "bus_file",
+    ]
+
+    missing_attachments = [
+        file_name
+        for file_name in required_files
+        if not attachments.get(file_name)
+    ]
+
+    if missing_attachments:
+        return {
+            "missing_attachments": missing_attachments,
+            "error": {
+                "node": "extract_create_params_node",
+                "message": "创建仿真缺少必要附件",
+                "missing_attachments": missing_attachments,
+            },
+        }
+
+    request_params = {
+        "name": data.get("name"),
+        "running_time_step": data.get("running_time_step", 3600),
+        "description": data.get("description", ""),
+        "use_random_match": data.get("use_random_match", True),
+        "use_cost": data.get("use_cost", True),
+        "attachments": attachments,
+    }
+
+    return {
+        "request_params": request_params,
+        "missing_attachments": [],
+        "audit_events": [
+            {
+                "node": "extract_create_params_node",
+                "request_params": request_params,
+            }
+        ],
+    }
+
+def route_after_param_extraction(
+    state: TrafficAgentState,
+) -> Literal["ok","error"]:
+    if state.get("error"):
+        return "error"
+    return "ok"

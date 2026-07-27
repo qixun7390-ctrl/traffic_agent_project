@@ -4,3 +4,16 @@ __pycache__/
 .venv/
 env/
 .env
+storage/
+parse_simulation_logs.py/
+tests/
+.env.example
+docker-compose.yml/
+test/
+areas/
+datas/
+.pytest_cache/
+.vscode/
+.idea/
+logs/
+*.log
