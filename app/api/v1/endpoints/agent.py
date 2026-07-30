@@ -1,27 +1,40 @@
-from app.agent.agent import TrafficReActAgent
+from multipart import file_path
+from app.agent.agent import TrafficReActAgent, get_agent_runtime
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.schemas.agent import AgentResponse, AgentRunRequest, AgentResumeRequest
 from app.models.user import User
 from fastapi import APIRouter, Depends, UploadFile, File
 from uuid import uuid4
 from pathlib import Path
+import json
 
 router = APIRouter()
 
-_agent_runtime: TrafficReActAgent | None = None
-def get_agent_runtime() -> TrafficReActAgent:
-    """创建Agent单例 避免请求初始化失去之前状态"""
-    global _agent_runtime
-    if _agent_runtime is None:
-        _agent_runtime = TrafficReActAgent()
-    return _agent_runtime
-
 async def save_upload_file(file: UploadFile, target_dir: Path) -> str:
     target_dir.mkdir(parents=True,exist_ok=True)
-    file_path = target_dir / file.filename
+
+    if not file.filename:
+        raise ValueError("上传文件缺少文件名")
+
+    file_path = target_dir / Path(file.filename).name
+
     content = await file.read()
     file_path.write_bytes(content)
+
     return str(file_path)
+
+def validate_json_file(file_path: str) -> None:
+    path = Path(file_path)
+
+    if path.suffix.lower() != ".json":
+        raise ValueError(f"{path.name}不是JSON文件")
+    try:
+        with path.open("r",encoding="utf-8") as file_object:
+            json.load(file_object)
+
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{path.name}不是合法JSON:{e}") from e
 
 @router.post("/upload-files")
 async def upload_agent_files(
@@ -32,7 +45,12 @@ async def upload_agent_files(
     bus_file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
 ):
-    upload_dir = Path("storage") / "agent-uploads" / str(current_user.id) / str(uuid4())
+    upload_dir = (
+        Path(settings.SIMULATION_ARTIFACT_ROOT)
+        / "agent_uploads"
+        / str(current_user.id)
+        / str(uuid4())
+    )
 
     attachments = {
         "map_file": await save_upload_file(map_file, upload_dir),
@@ -42,9 +60,28 @@ async def upload_agent_files(
         "bus_file": await save_upload_file(bus_file, upload_dir),
     }
 
+    try:
+        for file_path in attachments.values():
+            validate_json_file(file_path)
+    except ValueError as exc:
+        return {
+            "message": "文件校验失败",
+            "validation_status": "FAILED",
+            "error": str(exc),
+            "attachments": attachments,
+        }
+
     return {
-        "message": "文件上传成功",
+        "message": "文件上传并校验成功",
+        "validation_status": "PASSED",
         "attachments": attachments,
+        "files": {
+            "map_file": map_file.filename,
+            "signal_file": signal_file.filename,
+            "stop_file": stop_file.filename,
+            "order_file": order_file.filename,
+            "bus_file": bus_file.filename,
+        }
     }
 
 @router.post("/run",response_model=AgentResponse)
@@ -62,6 +99,7 @@ async def run_agent(
     result = await agent_runtime.ainvoke(
         message=request.message,
         thread_id=thread_id,
+        user_id=str(current_user.id),
         attachments=attachments,
     )
     #创建或删除达到interrupt时，等待用户确认
@@ -121,6 +159,21 @@ async def resume_agent(
     current_user: User = Depends(get_current_user),
     agent_runtime: TrafficReActAgent = Depends(get_agent_runtime),
 ) -> AgentResponse:
+    expected_prefix = f"user-{current_user.id}-"
+
+    if not request.thread_id.startswith(expected_prefix):
+        return AgentResponse(
+            status="failed",
+            thread_id=request.thread_id,
+            message="无权恢复该任务",
+            data= {
+                "error": {
+                    "node": "resume_agent",
+                    "message": "thread_id 不属于当前用户",
+                }
+            },
+        )
+
     result = await agent_runtime.resume(
         thread_id=request.thread_id,
         approved=request.approved,

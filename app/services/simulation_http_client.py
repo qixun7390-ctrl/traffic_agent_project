@@ -57,6 +57,7 @@ class SimulationPlatformclient:
                 )
 
                 return response.json()
+
             elif method.upper() == 'POST':
                if files:
                    response = await self.client.post(
@@ -71,13 +72,14 @@ class SimulationPlatformclient:
                        data = data,
                        params=params
                    )
+
             elif method.upper() == "DELETE":
                 response = await self.client.delete(
                     url,
                     params=params,
-                    data=data,
-                    files=files,
+                    follow_redirects=True
                 )
+
             else:
                 raise ValueError(f"不支持的HTTP方法:{method}")
             #检查HTTP响应码
@@ -487,10 +489,18 @@ class SimulationPlatformclient:
         simulation_id: str
     ) -> None:
         """删除仿真"""
-        if simulation_id <= 0:
-            raise ValueError(
-                "simulation_id必须大于0"
+        try:
+            sim_id = int(simulation_id)
+            if sim_id <= 0:
+                raise ValueError(
+                    "simulation_id必须大于0"
             )
+        except ValueError as e:
+            if "int()" in str(e):
+                raise ValueError("simulation_id必须是有效的数字")
+            raise
+
+        #远端仿真平台发送删除请求
         response = await self.make_request(
             "DELETE",
             f"/simulation/simulation/{simulation_id}"

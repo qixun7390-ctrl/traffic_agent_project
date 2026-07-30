@@ -6,7 +6,10 @@ import re
 from app.agent.state import TrafficAgentState
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
+from uuid import UUID
 
+from app.core.database import AsyncSessionLocal
+from app.services.simulation_run_service import SimulationRunService
 from app.core.config import settings
 from app.schemas.agent import AgentOperation
 from app.services.llm_service import LLMService
@@ -296,6 +299,14 @@ async def create_execute_node(
 ) -> dict[str, Any]:
     params = state.get("request_params", {})
     attachments = params.get("attachments", {})
+    user_id = state.get("user_id")
+    if not user_id:
+        return {
+            "error": {
+                "node": "create_execute_node",
+                "message": "缺少user_id，无法保存仿真记录"
+            }
+        }
     suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_name = params.get("name") or "agent_area"
 
@@ -346,6 +357,14 @@ async def create_execute_node(
             use_random_match=params.get("use_random_match", True),
             use_cost=params.get("use_cost", True),
         )
+
+    async with AsyncSessionLocal() as db:
+        service = SimulationRunService(db)
+        await service.create_run_for_user(
+            user_id = UUID(user_id),
+            platform_simulation_id = simulation_id,
+            attachments = attachments,
+        )
         result = {
             "area_id": area_id,
             "stop_data_id": stop_data_id,
@@ -366,20 +385,37 @@ async def create_execute_node(
 async def delete_execute_node(
     state: TrafficAgentState,
 ) -> dict[str, Any]:
-    params = state.get("request_params", {})
+    params = state.get("request_params",{})
     simulation_id = params.get("simulation_id")
+    user_id = state.get("user_id")
 
-    async with SimulationPlatformclient(
-        base_url=settings.SIMULATION_PLATFORM_BASE_URL,
-        token=settings.SIMULATION_PLATFORM_TOKEN,
-    ) as client:
-        platform_response = await client.delete_simulation(
-            simulation_id=simulation_id,
+    if not user_id:
+        return {
+            "error": {
+                "node": "delete_execute_node",
+                "message": "缺少user_id,无法删除仿真"
+            }
+        }
+
+    async with AsyncSessionLocal() as db:
+        service = SimulationRunService(db)
+
+        deleted = await service.delete_run_for_user(
+            user_id = UUID(user_id),
+            simulation_id = simulation_id,
         )
 
+    if not deleted:
+        return {
+            "error": {
+                "node": "delete_execute_node",
+                "message": "仿真不存在或无权删除",
+                "simulation_id": simulation_id,
+            }
+        }
     result = {
         "simulation_id": simulation_id,
-        "platform_response": platform_response,
+        "message": "删除成功",
     }
 
     return {
@@ -387,7 +423,7 @@ async def delete_execute_node(
         "audit_events": [
             {
                 "node": "delete_execute_node",
-                "result": result,
+                "result": result
             }
         ],
     }
@@ -487,6 +523,88 @@ async def extract_query_params_node(
                 "node": "extract_query_params_node",
                 "simulation_id": simulation_id,
                 "metrics": metrics
+            }
+        ]
+    }
+
+async def query_ownership_check_node(
+    state: TrafficAgentState,
+) -> dict[str, Any]:
+    params = state.get("request_params", {})
+    simulation_id = params.get("simulation_id")
+    user_id = state.get("user_id")
+
+    if not user_id:
+        return {
+            "error": {
+                "node": "query_ownership_check_node",
+                "message": "缺少user_id，无法查询仿真",
+            }
+        }
+
+    async with AsyncSessionLocal() as db:
+        service = SimulationRunService(db)
+        run = await service.get_run_for_user(
+            user_id=UUID(user_id),
+            simulation_id=simulation_id,
+        )
+
+    if run is None:
+        return {
+            "error": {
+                "node": "query_ownership_check_node",
+                "message": "仿真不存在或无权查询",
+                "simulation_id": simulation_id,
+            }
+        }
+
+    return {
+        "audit_events": [
+            {
+                "node": "query_ownership_check_node",
+                "simulation_id": simulation_id,
+                "ownership_check": "passed",
+            }
+        ]
+    }
+
+async def delete_ownership_check_node(
+    state: TrafficAgentState,
+) -> dict[str, Any]:
+    """删除的用户确认节点"""
+    params = state.get("request_params", {})
+    simulation_id = params.get("simulation_id")
+    user_id = state.get("user_id")
+
+    if not user_id:
+        return {
+            "error": {
+                "node": "delete_ownership_check_node",
+                "message": "缺少user_id，无法删除仿真",
+            }
+        }
+
+    async with AsyncSessionLocal() as db:
+        service = SimulationRunService(db)
+        run = await service.get_run_for_user(
+            user_id=UUID(user_id),
+            simulation_id=simulation_id,
+        )
+    if run is None:
+        return {
+            "error": {
+                "node": "delete_ownership_check_node",
+                "message": "仿真不存在或无权删除",
+                "simulation_id": simulation_id,
+            }
+        }
+
+    return {
+        "audit_events": [
+            {
+                "node": "delete_ownership_check_node",
+                "simulation_id": simulation_id,
+                "ownership_check": "passed",
             }
         ]
     }

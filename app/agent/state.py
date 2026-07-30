@@ -18,6 +18,8 @@ class TrafficAgentState(TypedDict,total=False):
     messages: Annotated[list[AnyMessage],add_messages]
     audit_events: Annotated[list[dict[str, Any]],operator.add]
 
+    user_id: str
+
     #用户上传JSON的路径
     attachments: dict[str, str]
 

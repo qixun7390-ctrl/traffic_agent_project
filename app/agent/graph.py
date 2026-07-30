@@ -11,18 +11,19 @@ from app.agent.nodes import (
     route_after_confirmation,
     route_after_param_extraction,
     route_by_operation,
-    should_continue_query,
+    should_continue_query, query_ownership_check_node, delete_ownership_check_node,
 )
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langgraph.graph import END,START,StateGraph
 from langgraph.prebuilt import ToolNode
 from app.agent.state import TrafficAgentState
-from langgraph.checkpoint.memory import MemorySaver
+from typing import Any
 
 def build_traffic_agent_graph(
     query_model_with_tools: Runnable,
     query_tools: list[BaseTool],
+    checkpointer: Any,
 ):
     graph = StateGraph(TrafficAgentState)
 
@@ -40,7 +41,14 @@ def build_traffic_agent_graph(
         "extract_delete_params",
         extract_delete_params_node,
     )
-
+    graph.add_node(
+        "query_ownership_check",
+        query_ownership_check_node,
+    )
+    graph.add_node(
+        "delete_ownership_check",
+        delete_ownership_check_node,
+    )
     graph.add_node(
         "query_agent",
         build_query_agent_node(query_model_with_tools),
@@ -75,8 +83,26 @@ def build_traffic_agent_graph(
         "extract_query_params",
         route_after_param_extraction,
         {
+            "ok": "query_ownership_check",
+            "error": END,
+        }
+    )
+
+    graph.add_conditional_edges(
+        "query_ownership_check",
+        route_after_param_extraction,
+        {
             "ok": "query_agent",
             "error": END,
+        }
+    )
+
+    graph.add_conditional_edges(
+        "query_agent",
+        should_continue_query,
+        {
+            "tools": "query_tools",
+            "end": END,
         }
     )
 
@@ -93,10 +119,20 @@ def build_traffic_agent_graph(
         "extract_delete_params",
         route_after_param_extraction,
         {
+            "ok": "delete_ownership_check",
+            "error": END,
+        }
+    )
+
+    graph.add_conditional_edges(
+        "delete_ownership_check",
+        route_after_param_extraction,
+        {
             "ok": "delete_confirmation",
             "error": END,
         }
     )
+
     graph.add_conditional_edges(
         "create_confirmation",
         route_after_confirmation,
@@ -113,18 +149,10 @@ def build_traffic_agent_graph(
             "end": END,
         }
     )
-    graph.add_conditional_edges(
-        "query_agent",
-        should_continue_query,
-        {
-            "tools": "query_tools",
-            "end": END,
-        }
-    )
 
     graph.add_edge("query_tools", "query_agent")
     graph.add_edge("create_execute", END)
     graph.add_edge("delete_execute", END)
 
-    return graph.compile(checkpointer=MemorySaver())
+    return graph.compile(checkpointer=checkpointer)
 

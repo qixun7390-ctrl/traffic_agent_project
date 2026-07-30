@@ -8,34 +8,44 @@ from app.tools.simulation_tools import (
 from langgraph.types import Command
 from langchain_core.messages import HumanMessage
 from typing import Any
+from contextlib import AsyncExitStack
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from app.core.config import settings
 QUERY_TOOLS = [
     get_simulation_duration,
     get_created_order_count,
     get_completed_order_count,
 ]
 
+_agent_runtime: "TrafficReActAgent | None" = None
+_agent_exit_stack = AsyncExitStack()
+
 class TrafficReActAgent:
     """对外调用入口"""
-    def __init__(self):
+    def __init__(self, checkpointer):
         llm = LLMService()
         query_model_with_tools = llm.bind_tools(
             QUERY_TOOLS,
         )
         self.graph = build_traffic_agent_graph(
             query_model_with_tools=query_model_with_tools,
-            query_tools=QUERY_TOOLS
+            query_tools=QUERY_TOOLS,
+            checkpointer=checkpointer
         )
 
     async def ainvoke(
         self,
+        user_id: str,
         message: str,
         thread_id: str,
         attachments: dict[str,str] | None = None
     ) -> dict[str, Any]:
+        """用户发送消息，用户id，附件，审计文件传入Graph中"""
         state = {
             "messages": [
                 HumanMessage(content=message)
             ],
+            "user_id": user_id,
             "attachments": attachments or {},
             "audit_events": [],
         }
@@ -67,3 +77,54 @@ class TrafficReActAgent:
             ),
             config=config
         )
+
+async def init_agent_runtime() -> None:
+    """FastAPI 启动时初始化Agent和PostgreSQL Checkpointer"""
+    global  _agent_runtime, _agent_exit_stack
+
+    if _agent_runtime is not None:
+        return
+
+    try:
+        #创建Checkpointer from_context_string 返回异步上下文管理器
+        checkpointer_context = AsyncPostgresSaver.from_conn_string(
+            settings.LANGGRAPH_CHECKPOINT_DATABASE_URL,
+        )
+
+        #进入上下文，获得checkpointer实例
+        #同时将资源注册到退出栈,应用关闭时自动清理
+        checkpointer = await _agent_exit_stack.enter_async_context(
+            checkpointer_context
+        )
+
+        #初始化数据库表
+        await checkpointer.setup()
+
+        #实例创建
+        _agent_runtime = TrafficReActAgent(
+            checkpointer = checkpointer
+        )
+
+    except Exception as e:
+        #如果初始化失败,清理已注册的资源
+        await _agent_exit_stack.aclose()
+        #重新创建退出栈
+        _agent_exit_stack = AsyncExitStack()
+
+        raise RuntimeError(f"Agent初始化失败:{e}")
+
+def get_agent_runtime() -> TrafficReActAgent:
+    """FastAPI 接口里获取已经初始化好的Agent"""
+    if _agent_runtime is None:
+        raise RuntimeError("Agent runtime尚未初始化")
+    return _agent_runtime
+
+async def close_agent_runtime() -> None:
+    """FastAPI关闭时释放Checkpointer 连接"""
+    global _agent_runtime
+    global _agent_exit_stack
+
+    _agent_runtime = None
+
+    await _agent_exit_stack.aclose()
+    _agent_exit_stack = AsyncExitStack()

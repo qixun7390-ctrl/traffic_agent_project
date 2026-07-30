@@ -1,11 +1,10 @@
 from fileinput import close
-
+from app.agent.agent import init_agent_runtime, close_agent_runtime
 from fastapi import FastAPI
 from app.api.v1.api import api_router
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.database import init_db,close_db
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -13,8 +12,11 @@ async def lifespan(app: FastAPI):
 
     #启动时初始化数据库
     await init_db()
+    await init_agent_runtime()
+
     yield
-    #关闭数据库连接
+    
+    await close_agent_runtime()
     await close_db()
 
 app = FastAPI(

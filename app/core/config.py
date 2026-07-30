@@ -15,14 +15,17 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
 
     # 数据库设置
-    DATABASE_URL: str = "postgresql://username:password@localhost:5432/traffic_project"
-    DATABASE_HOST: str = "localhost"
-    DATABASE_PORT: int = 5432
-    DATABASE_NAME: str = "traffic_project"
-    DATABASE_USER: str = "traffic_agent"
-    DATABASE_PASSWORD: str = "password123"
+    DATABASE_URL: str = ""
+    DATABASE_HOST: str = ""
+    DATABASE_PORT: int = ""
+    DATABASE_NAME: str = ""
+    DATABASE_USER: str = ""
+    DATABASE_PASSWORD: str = ""
     DATABASE_POOL_SIZE: int = 10
     DATABASE_MAX_OVERFLOW: int = 20
+
+    #LangGraph checkpoint 设置
+    LANGGRAPH_CHECKPOINT_DATABASE_URL: str = ""
 
     # JWT安全设置
     SECRET_KEY: str
