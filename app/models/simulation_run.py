@@ -32,6 +32,11 @@ class SimulationRun(Base):
         nullable=False,
         default="CREATED",
     )
+    upload_batch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+        index=True,
+    )
     map_file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     signal_file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     stop_file_path: Mapped[str] = mapped_column(String(1024), nullable=False)

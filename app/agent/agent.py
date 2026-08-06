@@ -6,11 +6,12 @@ from app.tools.simulation_tools import (
     get_created_order_count,
 )
 from langgraph.types import Command
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from typing import Any
 from contextlib import AsyncExitStack
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from app.core.config import settings
+
 QUERY_TOOLS = [
     get_simulation_duration,
     get_created_order_count,
@@ -38,15 +39,20 @@ class TrafficReActAgent:
         user_id: str,
         message: str,
         thread_id: str,
-        attachments: dict[str,str] | None = None
+        attachments: dict[str,str] | None = None,
+        upload_batch_id: str | None = None,
+        history_context: str | None = None,
     ) -> dict[str, Any]:
         """用户发送消息，用户id，附件，审计文件传入Graph中"""
+        messages = []
+        if history_context:
+            messages.append(SystemMessage(content=history_context))
+        messages.append(HumanMessage(message))
         state = {
-            "messages": [
-                HumanMessage(content=message)
-            ],
+            "messages": messages,
             "user_id": user_id,
             "attachments": attachments or {},
+            "upload_batch_id": upload_batch_id,
             "audit_events": [],
         }
         config = {
@@ -58,6 +64,41 @@ class TrafficReActAgent:
             state,
             config=config
         )
+
+    async def astream(
+        self,
+        user_id: str,
+        message: str,
+        thread_id: str,
+        attachments: dict[str, str] | None = None,
+        upload_batch_id: str | None = None,
+        history_context: str | None = None,
+    ):
+        """流失输出方法"""
+        messages = []
+        if history_context:
+            messages.append(SystemMessage(content=history_context))
+        messages.append(HumanMessage(content=message))
+        state = {
+            "messages": messages,
+            "user_id": user_id,
+            "attachments": attachments or {},
+            "upload_batch_id": upload_batch_id,
+            "audit_events": [],
+        }
+
+        config = {
+            "configurable": {
+                "thread_id": thread_id,
+            }
+        }
+
+        async for event in self.graph.astream(
+            state,
+            config=config,
+            stream_mode="updates",
+        ):
+            yield event
 
     async def resume(
         self,
@@ -77,6 +118,28 @@ class TrafficReActAgent:
             ),
             config=config
         )
+
+    async def resume_stream(
+        self,
+        thread_id: str,
+        approved: bool,
+    ):
+        config = {
+            "configurable": {
+                "thread_id": thread_id,
+            }
+        }
+
+        async for event in self.graph.astream(
+            Command(
+                resume={
+                    "approved": approved
+                }
+            ),
+            config=config,
+            stream_mode="updates",
+        ):
+            yield event
 
 async def init_agent_runtime() -> None:
     """FastAPI 启动时初始化Agent和PostgreSQL Checkpointer"""

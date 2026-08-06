@@ -23,6 +23,9 @@ class TrafficAgentState(TypedDict,total=False):
     #用户上传JSON的路径
     attachments: dict[str, str]
 
+    #上传批次ID
+    upload_batch_id: str | None
+
     #控制流
     operation: AgentOperation | None
     confirmation_status: Literal["pending","approved","rejected"] | None
@@ -35,3 +38,6 @@ class TrafficAgentState(TypedDict,total=False):
 
     #异常
     error: dict[str, Any] | None
+
+    #历史上下文
+    history_context: str | None

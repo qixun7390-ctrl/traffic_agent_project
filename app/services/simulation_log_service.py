@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from tests.test2 import total_pages
-
 
 class SimulationLogService:
     """获取完整仿真日志并保存为.log文件"""

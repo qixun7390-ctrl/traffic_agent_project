@@ -49,7 +49,7 @@ async def download_simulation_file(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """用户可以下载回溯之前所上传的json文件"""
+    """将文件返回给浏览器"""
     service = SimulationRunService(db)
 
     file_result = await service.get_file_for_user(

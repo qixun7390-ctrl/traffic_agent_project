@@ -63,30 +63,31 @@ QUERY_AGENT_SYSTEM_PROMPT = """
 QUERY_PARAMS_SYSTEM_PROMPT = """
 你是交通仿真查询参数抽取器。
 
-从用户问题中抽取：
+你的任务：从用户问题中抽取：
 1. simulation_id
 2. metrics
 
-metrics 只能从下面选择：
-- duration
-- created_order_count
-- completed_order_count
+重要规则：
+- 如果用户说“刚刚那个 / 上一个 / 这个 / 那条仿真”，必须结合上文摘要中的最近一次成功仿真来判断 simulation_id。
+- 如果上文摘要里明确给出了最近成功仿真的 simulation_id，而用户没有重新指定新的 simulation_id，就直接使用那个值。
+- 如果用户明确说了某个 simulation_id，以用户新输入为准。
+- metrics 只能从下面选择：
+  - duration
+  - created_order_count
+  - completed_order_count
+- 如果用户问“跑了多久”，选 duration。
+- 如果用户问“创建了多少订单”，选 created_order_count。
+- 如果用户问“完成了多少订单”，选 completed_order_count。
+- 如果用户问整体情况，可以三个都选。
 
-如果用户问“跑多久”，选择 duration。
-如果用户问“创建多少订单”，选择 created_order_count。
-如果用户问“完成多少订单”，选择 completed_order_count。
-如果用户问整体情况，可以三个都选。
-
-只返回 JSON，不要解释。
+你只返回 JSON，不要解释。
 
 返回格式：
 {
   "simulation_id": 283,
   "metrics": ["duration", "created_order_count", "completed_order_count"]
 }
-"""
-
-CREATE_PARAMS_SYSTEM_PROMPT = """
+"""`r`n`r`nCREATE_PARAMS_SYSTEM_PROMPT = """
 你是交通仿真创建参数抽取器。
 
 从用户自然语言中抽取创建仿真的参数：
@@ -300,6 +301,8 @@ async def create_execute_node(
     params = state.get("request_params", {})
     attachments = params.get("attachments", {})
     user_id = state.get("user_id")
+    upload_batch_id_raw = state.get("upload_batch_id")
+
     if not user_id:
         return {
             "error": {
@@ -307,6 +310,15 @@ async def create_execute_node(
                 "message": "缺少user_id，无法保存仿真记录"
             }
         }
+    if not upload_batch_id_raw:
+        return {
+            "error":{
+                "node": "create_execute_node",
+                "message": "缺少upload_batch_id，无法保存仿真记录",
+            }
+        }
+
+    upload_batch_id = UUID(upload_batch_id_raw)
     suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_name = params.get("name") or "agent_area"
 
@@ -364,6 +376,7 @@ async def create_execute_node(
             user_id = UUID(user_id),
             platform_simulation_id = simulation_id,
             attachments = attachments,
+            upload_batch_id=upload_batch_id,
         )
         result = {
             "area_id": area_id,
@@ -471,7 +484,8 @@ async def extract_query_params_node(
     llm = LLMService()
     raw_result = await llm.generate_response(
         system_prompt=QUERY_PARAMS_SYSTEM_PROMPT,
-        user_message=user_message
+        user_message=user_message,
+        history_context=state.get("history_context"),
     )
     data = json.loads(raw_result)
 
@@ -641,11 +655,12 @@ async def extract_create_params_node(
 ) -> dict[str, Any]:
     user_message = get_last_user_message(state)
     attachments = state.get("attachments", {})
-
+    upload_batch_id = state.get("upload_batch_id")
     llm = LLMService()
     raw_result = await llm.generate_response(
         system_prompt=CREATE_PARAMS_SYSTEM_PROMPT,
         user_message=user_message,
+        history_context=state.get("history_context")
     )
 
     data = json.loads(raw_result)
@@ -666,6 +681,16 @@ async def extract_create_params_node(
         "order_file",
         "bus_file",
     ]
+
+    if not upload_batch_id:
+        return {
+            "missing_attachments": required_files,
+            "error": {
+                "node": "extract_create_params_node",
+                "message": "创建仿真前必须上传所有完整的文件",
+                "missing_attachments": required_files,
+            }
+        }
 
     missing_attachments = [
         file_name

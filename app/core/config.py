@@ -44,7 +44,8 @@ class Settings(BaseSettings):
     SIMULATION_PLATFORM_BASE_URL: str = ""
     SIMULATION_PLATFORM_TOKEN: str = ""
 
-    # 存储位置
+    # 用户上传文件存储
+    MAX_UPLOAD_FILE_SIZE: int = 50 * 1024 * 1024
     SIMULATION_ARTIFACT_ROOT: str = "D:/PythonProject2/traffic_agent_project_backend/storage"
 
     model_config = SettingsConfigDict(

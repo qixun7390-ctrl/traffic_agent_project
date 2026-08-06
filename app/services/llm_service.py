@@ -52,18 +52,16 @@ class LLMService:
         self,
         system_prompt: str,
         user_message: str,
+        history_context: str | None = None,
     ) -> str:
         """调用大模型并返回文本结果"""
-        response = await self.chat_model.ainvoke(
-            [
-                SystemMessage(
-                    content = system_prompt
-                ),
-                HumanMessage(
-                    content = user_message
-                )
-            ]
-        )
+        messages = [
+            SystemMessage(content=system_prompt),
+        ]
+        if history_context:
+            messages.append(SystemMessage(content=history_context))
+        messages.append(HumanMessage(content=user_message))
+        response = await self.chat_model.ainvoke(messages)
 
         content = response.content
 

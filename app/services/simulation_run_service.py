@@ -2,10 +2,11 @@ from pathlib import Path
 from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.services.uploadfile_service import UploadFileService
 from app.core.config import settings
 from app.models.simulation_run import SimulationRun
 from app.services.simulation_http_client import SimulationPlatformclient
+from app.services.uploadfile_service import UploadFileService
 
 #允许用户上传的文件类型
 ALLOWED_FILE_TYPES = {
@@ -27,12 +28,14 @@ class SimulationRunService:
         user_id: UUID,
         platform_simulation_id: int,
         attachments: dict[str,str],
+        upload_batch_id: UUID,
     ) -> SimulationRun:
         """创建成功后保存记录"""
         run = SimulationRun(
             user_id = user_id,
             platform_simulation_id = platform_simulation_id,
             status = "CREATED",
+            upload_batch_id=upload_batch_id,
 
             map_file_path = attachments["map_file"],
             signal_file_path = attachments["signal_file"],
@@ -88,38 +91,24 @@ class SimulationRunService:
         simulation_id: int,
         file_type: str,
     ) -> tuple[Path, str] | None:
-        """下载前文件，同时用户只能下载自己的文件"""
+        """获取前文件，同时用户只能获取自己的文件"""
         if file_type not in ALLOWED_FILE_TYPES:
             return None
-
         run = await self.get_run_for_user(
-            user_id = user_id,
-            simulation_id = simulation_id,
+            user_id=user_id,
+            simulation_id=simulation_id,
         )
-
-        if run is None:
+        if run is None or run.upload_batch_id is None:
             return None
-
-        file_path_map = {
-            "map_file": run.map_file_path,
-            "signal_file": run.signal_file_path,
-            "stop_file": run.stop_file_path,
-            "order_file": run.order_file_path,
-            "bus_file": run.bus_file_path,
-        }
-
-        original_name_map = {
-            "map_file": run.map_original_name,
-            "signal_file": run.signal_original_name,
-            "stop_file": run.stop_original_name,
-            "order_file": run.order_original_name,
-            "bus_file": run.bus_original_name,
-        }
-
-        file_path = Path(file_path_map[file_type])
-        original_name = original_name_map[file_type]
-
-        return file_path, original_name
+        upload_file_service = UploadFileService(self.db)
+        file_record = await upload_file_service.get_file_batch(
+            user_id=user_id,
+            batch_id=run.upload_batch_id,
+            file_type=file_type,
+        )
+        if file_record is None:
+            return None
+        return Path(file_record.file_path), file_record.original_name
 
     async def delete_run_for_user(
         self,
@@ -132,7 +121,7 @@ class SimulationRunService:
             simulation_id = simulation_id
         )
 
-        if run is None:
+        if run is None or run.upload_batch_id is None:
             return False
 
         async with SimulationPlatformclient(
@@ -142,14 +131,11 @@ class SimulationRunService:
             await client.delete_simulation(
                 simulation_id=simulation_id,
             )
-
-        file_paths = [
-            run.map_file_path,
-            run.signal_file_path,
-            run.stop_file_path,
-            run.order_file_path,
-            run.bus_file_path,
-        ]
+        upload_file_service = UploadFileService(self.db)
+        file_paths = await upload_file_service.delete_files_for_batch(
+            user_id=user_id,
+            batch_id=run.upload_batch_id,
+        )
 
         for file_path in file_paths:
             path = Path(file_path)

@@ -1,5 +1,5 @@
 from typing import Literal, Any
-
+from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 AgentOperation = Literal[
@@ -62,7 +62,7 @@ class AgentRunRequest(BaseModel):
         min_length = 1,
         max_length = 200,
     )
-    attachments: AttachmentManifest | None = None
+    upload_batch_id: UUID | None = None
 
 class QueryParams(BaseModel):
     model_config = ConfigDict(extra="forbid")

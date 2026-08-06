@@ -503,7 +503,7 @@ class SimulationPlatformclient:
         #远端仿真平台发送删除请求
         response = await self.make_request(
             "DELETE",
-            f"/simulation/simulation/{simulation_id}"
+            f"/simulation/simulation/{simulation_id}/"
         )
         return response
 
