@@ -3,9 +3,9 @@ from datetime import timedelta
 from app.core.config import settings
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.user import User,UserRole
+from app.models.user import User
 from app.schemas.user import UserCreate
-from typing import Optional,List
+from typing import Optional
 from app.core.security import get_password_hash,verify_password,create_access_token
 
 logger = logging.getLogger(__name__)
@@ -32,28 +32,12 @@ class UserService:
             ValueError: 用户已存在
         """
         #检查用户是否存在
-        existing_user = await self.get_user_by_email(user_data.email)
-        if existing_user:
-            raise ValueError("邮箱已被注册")
-
         existing_user = await self.get_user_by_username(user_data.username)
         if existing_user:
             raise ValueError("用户名已被占用")
 
         #创建新用户
         return await self.create_user(user_data)
-
-    async def get_user_by_email(self,email: str) -> Optional[User]:
-        """通过邮箱查询用户"""
-        try:
-            query = select(User).where(User.email == email, User.is_active == True)
-            result = await self.db.execute(query)
-            return result.scalar_one_or_none()
-
-        except Exception as e:
-            logger.error(f"通过邮箱{email}获取用户时出错:{e}")
-            raise
-
 
     async def get_user_by_username(self,username):
         """通过username获取用户"""
@@ -75,11 +59,7 @@ class UserService:
             # 构造数据库用户对象
             user = User(
                 username=user_data.username,
-                email=str(user_data.email),
                 hashed_password=hash_password,
-                role=UserRole.USER,
-                is_superuser=False,
-                is_verified=False,
             )
 
             # 添加用户对象到数据库会话中
@@ -94,20 +74,17 @@ class UserService:
             logger.error(f"创建用户时出错:{e}")
             raise
 
-    async def authenticate(self,username_or_email: str,password: str) -> Optional[User]:
+    async def authenticate(self,username: str,password: str) -> Optional[User]:
         """
         通过用户名或邮箱验证用户
         Args:
-            username_or_email: 用户名或邮箱
+            username: 用户名或邮箱
             password: 密码
         Returns:
             验证成功的用户对象，失败则返回None
         """
         try:
-            user = await self.get_user_by_username(username_or_email)
-
-            if not user:
-                user = await self.get_user_by_email(username_or_email)
+            user = await self.get_user_by_username(username)
 
             if not user:
                 return None
@@ -123,12 +100,12 @@ class UserService:
 
     async def login_user(
         self,
-        user_or_email: str,
+        username: str,
         password: str
     ) -> dict:
         """登录用户并生成访问令牌"""
 
-        user = await self.authenticate(user_or_email, password)
+        user = await self.authenticate(username, password)
 
         if not user:
             raise ValueError("用户名或密码错误")
