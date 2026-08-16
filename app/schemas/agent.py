@@ -18,8 +18,8 @@ AgentRunStatus = Literal[
 
 QueryMetric = Literal[
     "duration",
-    "created_order_count",
-    "completed_order_count"
+    "order_summary",
+    "vehicle_summary",
 ]
 
 #用户文件附件

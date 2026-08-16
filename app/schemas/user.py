@@ -1,14 +1,12 @@
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
-from pydantic import BaseModel, Field, EmailStr, ConfigDict
-from app.models.user import UserRole
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class UserBase(BaseModel):
     """ 用户的基本属性 """
     username: str = Field(...,min_length=3,max_length=50)
-    email: EmailStr
 
 class UserCreate(UserBase):
     """注册时允许客户端提交的数据"""
@@ -20,9 +18,7 @@ class UserPublic(UserBase):
     """允许服务器返回给客户端的用户信息"""
     model_config = ConfigDict(from_attributes=True)
     id: UUID
-    role: UserRole
     is_active: bool
-    is_verified: bool
     create_at: datetime
     updated_at: datetime
 

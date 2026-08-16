@@ -1,12 +1,12 @@
 from app.agent.graph import build_traffic_agent_graph
 from app.services.llm_service import LLMService
 from app.tools.simulation_tools import (
-    get_completed_order_count,
     get_simulation_duration,
-    get_created_order_count,
+    get_simulation_order_summary,
+    get_simulation_vehicle_summary,
 )
 from langgraph.types import Command
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from typing import Any
 from contextlib import AsyncExitStack
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -14,8 +14,8 @@ from app.core.config import settings
 
 QUERY_TOOLS = [
     get_simulation_duration,
-    get_created_order_count,
-    get_completed_order_count,
+    get_simulation_order_summary,
+    get_simulation_vehicle_summary,
 ]
 
 _agent_runtime: "TrafficReActAgent | None" = None
@@ -44,16 +44,17 @@ class TrafficReActAgent:
         history_context: str | None = None,
     ) -> dict[str, Any]:
         """用户发送消息，用户id，附件，审计文件传入Graph中"""
-        messages = []
-        if history_context:
-            messages.append(SystemMessage(content=history_context))
-        messages.append(HumanMessage(message))
+        messages = [
+            HumanMessage(content=message)
+        ]
+
         state = {
             "messages": messages,
             "user_id": user_id,
             "attachments": attachments or {},
             "upload_batch_id": upload_batch_id,
             "audit_events": [],
+            "history_context": history_context,
         }
         config = {
             "configurable":{
@@ -74,17 +75,18 @@ class TrafficReActAgent:
         upload_batch_id: str | None = None,
         history_context: str | None = None,
     ):
-        """流失输出方法"""
-        messages = []
-        if history_context:
-            messages.append(SystemMessage(content=history_context))
-        messages.append(HumanMessage(content=message))
+        """流式输出方法"""
+        messages = [
+            HumanMessage(content=message)
+        ]
+
         state = {
             "messages": messages,
             "user_id": user_id,
             "attachments": attachments or {},
             "upload_batch_id": upload_batch_id,
             "audit_events": [],
+            "history_context": history_context,
         }
 
         config = {
