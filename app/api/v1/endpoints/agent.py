@@ -23,6 +23,26 @@ router = APIRouter()
 def format_sse(event:str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data,ensure_ascii=False)}\n\n"
 
+def safe_tool_call_name(tool_call) -> str:
+    if isinstance(tool_call, dict):
+        return tool_call.get("name", "未知工具")
+    return getattr(tool_call, "name", "未知工具")
+
+
+def safe_tool_message(message) -> dict:
+    content = getattr(message, "content", "")
+    parsed_content = content
+
+    try:
+        parsed_content = json.loads(content)
+    except Exception:
+        pass
+
+    return {
+        "name": getattr(message, "name", "未知工具"),
+        "content": parsed_content,
+    }
+
 async def save_and_format_sse(
     *,
     message_service: AgentMessageService,
@@ -190,6 +210,181 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 "stage": "create_execute",
                 "message": "仿真创建成功",
                 "data": update.get("last_result"),
+            },
+        )
+    if "extract_query_params" in event:
+        update = event["extract_query_params"]
+        if update.get("error"):
+            return (
+                "error",
+                {
+                    "status": "failed",
+                    "thread_id": thread_id,
+                    "stage": "extract_query_params",
+                    "message": update["error"].get("message", "查询参数提取失败"),
+                    "data": update,
+                },
+            )
+
+        params = update.get("request_params", {})
+        simulation_id = params.get("simulation_id")
+        metrics = params.get("metrics", [])
+
+        return (
+            "status",
+            {
+                "status": "running",
+                "thread_id": thread_id,
+                "stage": "extract_query_params",
+                "message": f"已提取查询参数：simulation_id={simulation_id}，指标={','.join(metrics)}",
+                "data": update,
+            },
+        )
+
+    if "query_ownership_check" in event:
+        update = event["query_ownership_check"]
+        if update.get("error"):
+            return (
+                "error",
+                {
+                    "status": "failed",
+                    "thread_id": thread_id,
+                    "stage": "query_ownership_check",
+                    "message": update["error"].get("message", "无权查询该仿真或仿真不存在"),
+                    "data": update,
+                },
+            )
+
+        return (
+            "status",
+            {
+                "status": "running",
+                "thread_id": thread_id,
+                "stage": "query_ownership_check",
+                "message": "已通过仿真归属校验",
+                "data": update,
+            },
+        )
+
+    if "query_agent" in event:
+        update = event["query_agent"]
+        messages = update.get("messages", [])
+        last_message = messages[-1] if messages else None
+
+        tool_calls = getattr(last_message, "tool_calls", None) or []
+
+        if tool_calls:
+            tool_names = [
+                safe_tool_call_name(tool_call)
+                for tool_call in tool_calls
+            ]
+
+            return (
+                "status",
+                {
+                    "status": "running",
+                    "thread_id": thread_id,
+                    "stage": "query_agent",
+                    "message": f"智能体准备调用查询工具：{'、'.join(tool_names)}",
+                    "data": {
+                        "tool_calls": tool_names,
+                    },
+                },
+            )
+
+        content = getattr(last_message, "content", "") if last_message else ""
+
+        return (
+            "done",
+            {
+                "status": "completed",
+                "thread_id": thread_id,
+                "stage": "query_agent",
+                "message": content or "查询完成",
+                "data": {
+                    "answer": content,
+                },
+            },
+        )
+
+    if "query_tools" in event:
+        update = event["query_tools"]
+        messages = update.get("messages", [])
+
+        tool_results = [
+            safe_tool_message(message)
+            for message in messages
+        ]
+
+        return (
+            "status",
+            {
+                "status": "running",
+                "thread_id": thread_id,
+                "stage": "query_tools",
+                "message": "查询工具已返回结果，正在整理回答",
+                "data": {
+                    "tool_results": tool_results,
+                },
+            },
+        )
+
+    if "extract_delete_params" in event:
+        update = event["extract_delete_params"]
+
+        if update.get("error"):
+            return (
+                "error",
+                {
+                    "status": "failed",
+                    "thread_id": thread_id,
+                    "stage": "extract_delete_params",
+                    "message": update["error"].get("message", "删除参数提取失败"),
+                    "data": update,
+                },
+            )
+
+        params = update.get("request_params", {})
+        simulation_id = params.get("simulation_id")
+
+        return (
+            "status",
+            {
+                "status": "running",
+                "thread_id": thread_id,
+                "stage": "extract_delete_params",
+                "message": f"已提取删除参数：simulation_id={simulation_id}",
+                "data": {
+                    "simulation_id": simulation_id,
+                },
+            },
+        )
+
+    if "delete_ownership_check" in event:
+        update = event["delete_ownership_check"]
+
+        if update.get("error"):
+            return (
+                "error",
+                {
+                    "status": "failed",
+                    "thread_id": thread_id,
+                    "stage": "delete_ownership_check",
+                    "message": update["error"].get("message", "仿真不存在或无权删除"),
+                    "data": update,
+                },
+            )
+
+        return (
+            "status",
+            {
+                "status": "running",
+                "thread_id": thread_id,
+                "stage": "delete_ownership_check",
+                "message": "已通过删除权限校验",
+                "data": {
+                    "ownership_check": "passed",
+                },
             },
         )
 
