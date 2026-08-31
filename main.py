@@ -1,3 +1,9 @@
+import asyncio
+import sys
+
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from fileinput import close
 from app.agent.agent import init_agent_runtime, close_agent_runtime
 from fastapi import FastAPI

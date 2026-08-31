@@ -9,12 +9,18 @@ logger = logging.getLogger(__name__)
 
 #创建异步引擎
 engine = create_async_engine(
-    settings.DATABASE_URL.replace("postgresql://","postgresql+asyncpg://"),
+    settings.DATABASE_URL.replace(
+        "postgresql://",
+        "postgresql+asyncpg://",
+    ),
     pool_size=settings.DATABASE_POOL_SIZE,
     max_overflow=settings.DATABASE_MAX_OVERFLOW,
-    #echo=settings.DEBUG
-    echo=True,  # 打印 SQL，帮助调试
-    pool_pre_ping=True,  # 连接前检查有效性
+    pool_recycle=1800,
+    pool_pre_ping=True,
+    connect_args={
+        "ssl": False,
+    },
+    echo=True,
 )
 
 #创建异步会话工厂

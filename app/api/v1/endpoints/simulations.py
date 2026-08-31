@@ -1,12 +1,37 @@
+import asyncio
+from pathlib import Path
+from urllib.parse import quote
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.user import User
 from app.services.simulation_run_service import SimulationRunService
-from fastapi.responses import FileResponse
+from app.services.simulation_operation_lock_service import (
+    SimulationOperationLockedError,
+    simulation_operation_locks,
+)
+from fastapi.responses import StreamingResponse
 
 router = APIRouter()
+
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+
+
+async def iter_locked_file(lock_context, file_path: Path):
+    try:
+        with file_path.open("rb") as file:
+            while True:
+                chunk = await asyncio.to_thread(
+                    file.read,
+                    DOWNLOAD_CHUNK_SIZE,
+                )
+                if not chunk:
+                    break
+                yield chunk
+    finally:
+        await lock_context.__aexit__(None, None, None)
 
 @router.get("/my")
 async def list_my_simulations(
@@ -72,10 +97,27 @@ async def download_simulation_file(
             detail="文件不存在",
         )
 
-    return FileResponse(
-        path = file_path,
-        filename = original_name,
-        media_type = "application/json"
+    lock_context = simulation_operation_locks.lock(
+        user_id=str(current_user.id),
+        simulation_id=simulation_id,
+    )
+    try:
+        await lock_context.__aenter__()
+    except SimulationOperationLockedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+
+    return StreamingResponse(
+        iter_locked_file(lock_context, file_path),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename*=UTF-8''{quote(original_name)}"
+            ),
+            "Content-Length": str(file_path.stat().st_size),
+        },
     )
 
 @router.delete("/{simulation_id}")
@@ -87,10 +129,20 @@ async def delete_my_simulation(
     """用户可以删除自己的仿真，包括这条创建成功的仿真所对应的json文件"""
     service = SimulationRunService(db)
 
-    deleted = await service.delete_run_for_user(
-        user_id = current_user.id,
-        simulation_id = simulation_id,
-    )
+    try:
+        async with simulation_operation_locks.lock(
+            user_id=str(current_user.id),
+            simulation_id=simulation_id,
+        ):
+            deleted = await service.delete_run_for_user(
+                user_id = current_user.id,
+                simulation_id = simulation_id,
+            )
+    except SimulationOperationLockedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
 
     if not deleted:
         raise HTTPException(

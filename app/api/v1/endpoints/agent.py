@@ -5,7 +5,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.schemas.agent import AgentResponse, AgentRunRequest, AgentResumeRequest
 from app.models.user import User
-from fastapi import APIRouter, Depends, UploadFile, File
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from uuid import uuid4
 from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +13,8 @@ from app.services.uploadfile_service import UploadFileService
 from app.services.agent_message_service import AgentMessageService
 from fastapi.responses import StreamingResponse
 import json
+import logging
+import shutil
 
 OPERATION_LABELS = {
     "create": "创建仿真",
@@ -20,8 +22,24 @@ OPERATION_LABELS = {
     "query": "查询仿真",
 }
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
 def format_sse(event:str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data,ensure_ascii=False)}\n\n"
+
+def safe_remove_upload_dir(upload_dir: Path, user_id) -> None:
+    resolved_upload_dir = upload_dir.resolve()
+    allowed_root = (
+        Path(settings.SIMULATION_ARTIFACT_ROOT)
+        / "agent_uploads"
+        / str(user_id)
+    ).resolve()
+
+    if allowed_root not in resolved_upload_dir.parents:
+        logger.warning("Skip unsafe upload cleanup path: %s", resolved_upload_dir)
+        return
+
+    shutil.rmtree(resolved_upload_dir, ignore_errors=True)
 
 def safe_tool_call_name(tool_call) -> str:
     if isinstance(tool_call, dict):
@@ -52,6 +70,7 @@ async def save_and_format_sse(
     data: dict,
     role: str = "assistant",
 ) -> str:
+    """构建SSE事件流"""
     content = data.get("message") or event_name
 
     await message_service.create_message(
@@ -79,13 +98,25 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
         interrupts = event.get("__interrupt__") or []
         interrupts_obj = interrupts[0] if interrupts else None
         interrupts_value = getattr(interrupts_obj, "value", None)
+        pending_action = (
+            interrupts_value.get("pending_action", {})
+            if isinstance(interrupts_value, dict)
+            else {}
+        )
+        operation = pending_action.get("operation")
+        operation_label = {
+            "create": "创建仿真",
+            "delete": "删除仿真",
+        }.get(operation, "执行该操作")
 
         return (
             "confirmation_required",
             {
                 "status": "awaiting_confirmation",
                 "thread_id": thread_id,
-                "message": "创建仿真需要用户确认后再执行",
+                "operation": operation,
+                "stage": f"{operation}_confirmation" if operation else "confirmation",
+                "message": f"{operation_label}需要用户确认后再执行",
                 "data": {
                     "interrupt": interrupts_value,
                 }
@@ -93,11 +124,26 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
         )
 
     if "intent" in event:
-        operation = event["intent"].get("operation")
+        update = event["intent"]
+        if update.get("error"):
+            return (
+                "error",
+                {
+                "status": "failed",
+                "thread_id": thread_id,
+                "stage": "intent",
+                "operation": "chat",
+                "message": update["error"].get("message", "意图识别失败"),
+                "data": update,
+            },
+            )
+
+        operation = update.get("operation")
         operation_label = {
             "create": "创建仿真",
             "delete": "删除仿真",
             "query": "查询仿真",
+            "chat": "普通对话",
         }.get(operation,operation)
 
         return (
@@ -106,8 +152,27 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 "status": "running",
                 "thread_id": thread_id,
                 "stage": "intent",
+                "operation": operation,
                 "message": f"经过Traffic Agent识别用户的意图为:{operation_label}",
             }
+        )
+
+    if "chat" in event:
+        update = event["chat"]
+        message = (
+            update.get("last_result", {}).get("message")
+            or "我目前可以帮你处理交通仿真的创建、查询和删除。"
+        )
+        return (
+            "done",
+            {
+                "status": "completed",
+                "thread_id": thread_id,
+                "stage": "chat",
+                "operation": "chat",
+                "message": message,
+                "data": update.get("last_result"),
+            },
         )
 
     if "extract_create_params" in event:
@@ -118,6 +183,8 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 {
                     "status": "failed",
                     "thread_id": thread_id,
+                    "stage": "extract_create_params",
+                    "operation": "create",
                     "message": update["error"].get("message","创建参数校验失败"),
                     "data": update,
                 },
@@ -129,6 +196,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 "status": "running",
                 "thread_id": thread_id,
                 "stage": "extract_create_params",
+                "operation": "create",
                 "message": "关于用户创建仿真的参数已提取，上传文件也校验通过",
             }
         )
@@ -144,6 +212,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                     "status": "cancelled",
                     "thread_id": thread_id,
                     "stage": "create_confirmation",
+                    "operation": "create",
                     "message": "用户已取消创建仿真",
                     "data": update,
                 },
@@ -155,6 +224,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 "status": "running",
                 "thread_id": thread_id,
                 "stage": "create_confirmation",
+                "operation": "create",
                 "message": "用户已确认，开始创建仿真",
                 "data": update.get("pending_action"),
             },
@@ -171,7 +241,8 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                     "status": "cancelled",
                     "thread_id": thread_id,
                     "stage": "delete_confirmation",
-                    "message": "用户已取消创建仿真",
+                    "operation": "delete",
+                    "message": "用户已取消删除仿真",
                     "data": update,
                 },
             )
@@ -182,6 +253,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 "status": "running",
                 "thread_id": thread_id,
                 "stage": "delete_confirmation",
+                "operation": "delete",
                 "message": "用户已确认，开始删除仿真",
                 "data": update.get("pending_action"),
             },
@@ -197,6 +269,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                     "status": "failed",
                     "thread_id": thread_id,
                     "stage": "create_execute",
+                    "operation": "create",
                     "message": update["error"].get("message","创建仿真失败"),
                     "data": update,
                 },
@@ -208,6 +281,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 "status": "completed",
                 "thread_id": thread_id,
                 "stage": "create_execute",
+                "operation": "create",
                 "message": "仿真创建成功",
                 "data": update.get("last_result"),
             },
@@ -221,6 +295,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                     "status": "failed",
                     "thread_id": thread_id,
                     "stage": "extract_query_params",
+                    "operation": "query",
                     "message": update["error"].get("message", "查询参数提取失败"),
                     "data": update,
                 },
@@ -236,6 +311,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 "status": "running",
                 "thread_id": thread_id,
                 "stage": "extract_query_params",
+                "operation": "query",
                 "message": f"已提取查询参数：simulation_id={simulation_id}，指标={','.join(metrics)}",
                 "data": update,
             },
@@ -250,6 +326,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                     "status": "failed",
                     "thread_id": thread_id,
                     "stage": "query_ownership_check",
+                    "operation": "query",
                     "message": update["error"].get("message", "无权查询该仿真或仿真不存在"),
                     "data": update,
                 },
@@ -261,6 +338,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 "status": "running",
                 "thread_id": thread_id,
                 "stage": "query_ownership_check",
+                "operation": "query",
                 "message": "已通过仿真归属校验",
                 "data": update,
             },
@@ -268,6 +346,19 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
 
     if "query_agent" in event:
         update = event["query_agent"]
+        if update.get("error"):
+            return (
+                "error",
+                {
+                    "status": "failed",
+                    "thread_id": thread_id,
+                    "stage": "query_agent",
+                    "operation": "query",
+                    "message": update["error"].get("message", "查询工具调用失败"),
+                    "data": update,
+                },
+            )
+
         messages = update.get("messages", [])
         last_message = messages[-1] if messages else None
 
@@ -285,6 +376,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                     "status": "running",
                     "thread_id": thread_id,
                     "stage": "query_agent",
+                    "operation": "query",
                     "message": f"智能体准备调用查询工具：{'、'.join(tool_names)}",
                     "data": {
                         "tool_calls": tool_names,
@@ -300,6 +392,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 "status": "completed",
                 "thread_id": thread_id,
                 "stage": "query_agent",
+                "operation": "query",
                 "message": content or "查询完成",
                 "data": {
                     "answer": content,
@@ -322,6 +415,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 "status": "running",
                 "thread_id": thread_id,
                 "stage": "query_tools",
+                "operation": "query",
                 "message": "查询工具已返回结果，正在整理回答",
                 "data": {
                     "tool_results": tool_results,
@@ -339,6 +433,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                     "status": "failed",
                     "thread_id": thread_id,
                     "stage": "extract_delete_params",
+                    "operation": "delete",
                     "message": update["error"].get("message", "删除参数提取失败"),
                     "data": update,
                 },
@@ -353,6 +448,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 "status": "running",
                 "thread_id": thread_id,
                 "stage": "extract_delete_params",
+                "operation": "delete",
                 "message": f"已提取删除参数：simulation_id={simulation_id}",
                 "data": {
                     "simulation_id": simulation_id,
@@ -370,6 +466,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                     "status": "failed",
                     "thread_id": thread_id,
                     "stage": "delete_ownership_check",
+                    "operation": "delete",
                     "message": update["error"].get("message", "仿真不存在或无权删除"),
                     "data": update,
                 },
@@ -381,6 +478,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 "status": "running",
                 "thread_id": thread_id,
                 "stage": "delete_ownership_check",
+                "operation": "delete",
                 "message": "已通过删除权限校验",
                 "data": {
                     "ownership_check": "passed",
@@ -397,6 +495,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                     "status": "failed",
                     "thread_id": thread_id,
                     "stage": "delete_execute",
+                    "operation": "delete",
                     "message": update["error"].get("message", "删除仿真失败"),
                     "data": update,
                 },
@@ -408,6 +507,7 @@ def translate_graph_event(event: dict, thread_id: str) -> tuple[str, dict]:
                 "status": "completed",
                 "thread_id": thread_id,
                 "stage": "delete_execute",
+                "operation": "delete",
                 "message": "仿真删除成功",
                 "data": update.get("last_result"),
             },
@@ -476,13 +576,17 @@ async def upload_agent_files(
             files[file_type] = file_info["original_name"]
         await db.commit()
 
-    except Exception as e:
+    except ValueError as e:
         await db.rollback()
-        return {
-            "message": "文件校验失败",
-            "validation_status": "FAILED",
-            "error": str(e)
-        }
+        safe_remove_upload_dir(upload_dir, current_user.id)
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "文件校验失败",
+                "validation_status": "FAILED",
+                "error": str(e),
+            },
+        ) from e
 
     return {
         "message": "文件上传并校验成功",
@@ -603,9 +707,9 @@ async def run_agent_stream(
     message_service = AgentMessageService(db)
     recent_messages = await message_service.list_recent_messages_for_context(
         user_id=current_user.id,
-        limit=20,
+        limit=settings.AGENT_EPISODIC_CONTEXT_LIMIT,
     )
-    history_context = message_service.build_history_context(recent_messages)
+    episodic_context = message_service.build_episodic_context(recent_messages)
 
     await message_service.create_message(
         user_id=current_user.id,
@@ -657,52 +761,71 @@ async def run_agent_stream(
         upload_batch_id = str(request.upload_batch_id)
     async def event_generator():
         has_terminal_event = False
-        start_data = {
-            "status": "started",
-            "thread_id": thread_id,
-            "message": "智能体开始处理请求",
-        }
-        yield await save_and_format_sse(
-            message_service=message_service,
-            user_id=current_user.id,
-            thread_id=thread_id,
-            event_name="status",
-            data=start_data
-        )
-
-        async for event in agent_runtime.astream(
-            message=request.message,
-            thread_id=thread_id,
-            user_id=str(current_user.id),
-            attachments=attachments,
-            upload_batch_id=upload_batch_id,
-            history_context=history_context,
-        ):
-            event_name, data = translate_graph_event(event, thread_id)
-            yield await save_and_format_sse(
-                message_service=message_service,
-                user_id=current_user.id,
-                thread_id=thread_id,
-                event_name=event_name,
-                data=data,
-            )
-
-            if event_name in {"confirmation_required", "error", "done"}:
-                has_terminal_event = True
-
-        if not has_terminal_event:
-            done_data = {
-                "status": "done",
+        try:
+            start_data = {
+                "status": "started",
                 "thread_id": thread_id,
-                "message": "智能体处理完成",
+                "message": "智能体开始处理请求",
             }
             yield await save_and_format_sse(
                 message_service=message_service,
                 user_id=current_user.id,
                 thread_id=thread_id,
-                event_name="done",
-                data=done_data,
+                event_name="status",
+                data=start_data
             )
+
+            async for event in agent_runtime.astream(
+                message=request.message,
+                thread_id=thread_id,
+                user_id=str(current_user.id),
+                attachments=attachments,
+                upload_batch_id=upload_batch_id,
+                history_context=episodic_context,
+            ):
+                event_name, data = translate_graph_event(event, thread_id)
+                yield await save_and_format_sse(
+                    message_service=message_service,
+                    user_id=current_user.id,
+                    thread_id=thread_id,
+                    event_name=event_name,
+                    data=data,
+                )
+
+                if event_name in {"confirmation_required", "error", "done"}:
+                    has_terminal_event = True
+
+            if not has_terminal_event:
+                done_data = {
+                    "status": "done",
+                    "thread_id": thread_id,
+                    "message": "智能体处理完成",
+                }
+                yield await save_and_format_sse(
+                    message_service=message_service,
+                    user_id=current_user.id,
+                    thread_id=thread_id,
+                    event_name="done",
+                    data=done_data,
+                )
+        except Exception as exc:
+            logger.exception("Agent stream failed: thread_id=%s", thread_id)
+            if not has_terminal_event:
+                error_data = {
+                    "status": "failed",
+                    "thread_id": thread_id,
+                    "message": "智能体处理异常，请稍后重试",
+                    "data": {
+                        "error": str(exc),
+                    },
+                }
+                yield await save_and_format_sse(
+                    message_service=message_service,
+                    user_id=current_user.id,
+                    thread_id=thread_id,
+                    event_name="error",
+                    data=error_data,
+                )
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream"
@@ -852,51 +975,70 @@ async def resume_agent_stream(
 
     async def event_generator():
         has_terminal_event = False
-        start_data = {
-            "status": "started",
-            "thread_id": request.thread_id,
-            "message": "正在恢复智能体任务",
-        }
-        yield await save_and_format_sse(
-            message_service=message_service,
-            user_id=current_user.id,
-            thread_id=request.thread_id,
-            event_name="status",
-            data=start_data,
-        )
-
-        async for event in agent_runtime.resume_stream(
-            thread_id = request.thread_id,
-            approved=request.approved,
-        ):
-            event_name, data = translate_graph_event(
-                event = event,
-                thread_id = request.thread_id
-            )
-            yield await save_and_format_sse(
-                message_service=message_service,
-                user_id=current_user.id,
-                thread_id=request.thread_id,
-                event_name=event_name,
-                data=data,
-            )
-
-            if event_name in {"confirmation_required", "error", "done"}:
-                has_terminal_event = True
-
-        if not has_terminal_event:
-            done_data = {
-                "status": "done",
+        try:
+            start_data = {
+                "status": "started",
                 "thread_id": request.thread_id,
-                "message": "智能体恢复执行完成",
+                "message": "正在恢复智能体任务",
             }
             yield await save_and_format_sse(
                 message_service=message_service,
                 user_id=current_user.id,
                 thread_id=request.thread_id,
-                event_name="done",
-                data=done_data,
+                event_name="status",
+                data=start_data,
             )
+
+            async for event in agent_runtime.resume_stream(
+                thread_id = request.thread_id,
+                approved=request.approved,
+            ):
+                event_name, data = translate_graph_event(
+                    event = event,
+                    thread_id = request.thread_id
+                )
+                yield await save_and_format_sse(
+                    message_service=message_service,
+                    user_id=current_user.id,
+                    thread_id=request.thread_id,
+                    event_name=event_name,
+                    data=data,
+                )
+
+                if event_name in {"confirmation_required", "error", "done"}:
+                    has_terminal_event = True
+
+            if not has_terminal_event:
+                done_data = {
+                    "status": "done",
+                    "thread_id": request.thread_id,
+                    "message": "智能体恢复执行完成",
+                }
+                yield await save_and_format_sse(
+                    message_service=message_service,
+                    user_id=current_user.id,
+                    thread_id=request.thread_id,
+                    event_name="done",
+                    data=done_data,
+                )
+        except Exception as exc:
+            logger.exception("Agent resume stream failed: thread_id=%s", request.thread_id)
+            if not has_terminal_event:
+                error_data = {
+                    "status": "failed",
+                    "thread_id": request.thread_id,
+                    "message": "智能体恢复执行异常，请稍后重试",
+                    "data": {
+                        "error": str(exc),
+                    },
+                }
+                yield await save_and_format_sse(
+                    message_service=message_service,
+                    user_id=current_user.id,
+                    thread_id=request.thread_id,
+                    event_name="error",
+                    data=error_data,
+                )
 
     return StreamingResponse(
         event_generator(),

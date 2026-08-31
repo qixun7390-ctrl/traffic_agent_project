@@ -5,8 +5,6 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.coverage
-htmlcov/
 
 # Virtual environments
 .venv/
@@ -19,26 +17,34 @@ env/
 !.env.example
 !.env.docker.example
 
-# Runtime storage / uploaded files / generated simulation artifacts
+# User uploaded files / runtime storage
 storage/
 uploads/
 logs/
-data/
-datas/
 *.log
 
-# Local/manual test folders and temporary workspace
-new_tests/
-test/
-tests/
+# Local business data, keep private for now
+datas/
 multi_work_area/
-
-# Docker local override / backup
-*.bak
-docker-compose.override.yml
-
-# IDE / OS
+# Local/manual test scripts may contain tokens and absolute paths
+tests/*
+!tests/conftest.py
+!tests/test_unit/
+!tests/test_unit/**
+!tests/test_api/
+!tests/test_api/**
+tests/**/__pycache__/
+tests/**/*.py[cod]
+test/
+test
+new_tests/
+tests/
+# IDE / OS files
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Temporary / backup files
+*.bak
+docker-compose.yml.bak

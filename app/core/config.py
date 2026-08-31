@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     #LangGraph checkpoint 设置
     LANGGRAPH_CHECKPOINT_DATABASE_URL: str = ""
 
+    # Agent 记忆设置
+    AGENT_WORKING_MEMORY_LIMIT: int = 100
+    AGENT_EPISODIC_CONTEXT_LIMIT: int = 100
+    AGENT_EPISODIC_SIMULATION_LIMIT: int = 10
+    AGENT_EPISODIC_EVENT_LIMIT: int = 5
+    AGENT_EPISODIC_CONTEXT_MAX_CHARS: int = 3000
+    AGENT_QUERY_MAX_TOOL_CALL_ROUNDS: int = 10
+
     # JWT安全设置
     SECRET_KEY: str
     ALGORITHM: str = "HS256"

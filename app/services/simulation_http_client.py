@@ -48,7 +48,6 @@ class SimulationPlatformclient:
             raise RuntimeError("客户端需要初始化")
 
         url = f"{self.base_url.rstrip('/')}{endpoint}"
-
         try:
             if method.upper() == "GET":
                 response = await self.client.get(
@@ -56,32 +55,31 @@ class SimulationPlatformclient:
                     params=params,
                 )
 
-                return response.json()
-
             elif method.upper() == 'POST':
-               if files:
-                   response = await self.client.post(
-                       url,
-                       params=params,
-                       data = data,
-                       files = files,
-                   )
-               else:
-                   response = await self.client.post(
-                       url,
-                       data = data,
-                       params=params
-                   )
+                if files:
+                    response = await self.client.post(
+                        url,
+                        params=params,
+                        data=data,
+                        files=files,
+                    )
+                else:
+                    response = await self.client.post(
+                        url,
+                        data=data,
+                        params=params,
+                    )
 
             elif method.upper() == "DELETE":
                 response = await self.client.delete(
                     url,
                     params=params,
-                    follow_redirects=True
+                    follow_redirects=True,
                 )
 
             else:
                 raise ValueError(f"不支持的HTTP方法:{method}")
+
             #检查HTTP响应码
             response.raise_for_status()
             if not response.text:

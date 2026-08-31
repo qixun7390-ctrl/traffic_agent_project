@@ -6,6 +6,7 @@ AgentOperation = Literal[
     "create",
     "query",
     "delete",
+    "chat",
 ]
 
 AgentRunStatus = Literal[

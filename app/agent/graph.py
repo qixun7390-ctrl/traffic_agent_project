@@ -7,18 +7,23 @@ from app.agent.nodes import (
     extract_create_params_node,
     extract_delete_params_node,
     extract_query_params_node,
+    chat_node,
     intent_node,
     route_after_confirmation,
     route_after_param_extraction,
     route_by_operation,
     should_continue_query, query_ownership_check_node, delete_ownership_check_node,
+    build_locked_query_tools_node
 )
+
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langgraph.graph import END,START,StateGraph
-from langgraph.prebuilt import ToolNode
+
 from app.agent.state import TrafficAgentState
+
 from typing import Any
+
 
 def build_traffic_agent_graph(
     query_model_with_tools: Runnable,
@@ -55,8 +60,9 @@ def build_traffic_agent_graph(
     )
     graph.add_node(
         "query_tools",
-        ToolNode(query_tools),
+        build_locked_query_tools_node(query_tools),
     )
+    graph.add_node("chat", chat_node)
 
     graph.add_node(
         "create_confirmation",
@@ -76,6 +82,7 @@ def build_traffic_agent_graph(
             "query": "extract_query_params",
             "create": "extract_create_params",
             "delete": "extract_delete_params",
+            "chat": "chat",
             "error": END,
         },
     )
@@ -151,6 +158,7 @@ def build_traffic_agent_graph(
     )
 
     graph.add_edge("query_tools", "query_agent")
+    graph.add_edge("chat", END)
     graph.add_edge("create_execute", END)
     graph.add_edge("delete_execute", END)
 

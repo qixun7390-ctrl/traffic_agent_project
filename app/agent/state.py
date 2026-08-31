@@ -32,6 +32,7 @@ class TrafficAgentState(TypedDict,total=False):
 
     #业务数据
     request_params: dict[str, Any]
+    query_tool_call_rounds: int
     pending_action: dict[str, Any] | None
     last_result: dict[str, Any] | None
     missing_attachments: list[str]

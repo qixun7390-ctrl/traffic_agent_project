@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 
 class UserBase(BaseModel):
@@ -13,6 +13,18 @@ class UserCreate(UserBase):
     #客户端提交未定义字段时拒绝
     model_config = ConfigDict(extra="forbid")
     password: str = Field(...,min_length=8,max_length=128)
+
+    @field_validator("username")
+    def validate_username(cls,v: str) -> str:
+        if not v or not v.strip() or ' ' in v:
+            raise ValueError("用户名不能包含空格")
+        return v
+
+    @field_validator("password")
+    def validate_password(cls, v: str) -> str:
+        if not v or not v.strip() or ' ' in v:
+            raise ValueError("密码中不能包含空格")
+        return v
 
 class UserPublic(UserBase):
     """允许服务器返回给客户端的用户信息"""

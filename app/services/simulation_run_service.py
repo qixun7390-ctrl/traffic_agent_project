@@ -11,6 +11,7 @@ from app.services.simulation_http_client import SimulationPlatformclient
 from app.services.uploadfile_service import UploadFileService
 from app.models.deleted_file import FileTrash
 import logging
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -154,9 +155,24 @@ class SimulationRunService:
                         logger.info(f"已成功删除远端仿真平台的仿真记录")
                         break
                     except Exception as e:
+                        error_text = str(e)
+                        if "[404]" in error_text:
+                            logger.info(
+                                f"远端仿真平台记录已不存在，继续清理本地仿真记录: simulation_id={simulation_id}"
+                            )
+                            break
+                        if any(
+                            status_code in error_text
+                            for status_code in ("[400]", "[401]", "[403]", "[422]")
+                        ):
+                            logger.error(
+                                f"远端仿真平台拒绝删除请求，不再重试: {error_text}"
+                            )
+                            raise
                         if attempt == max_attempts:
                             logger.error(f"已经达到最大尝试次数，但仍然无法删除仿真平台的仿真记录")
                             raise RuntimeError(f"已经达到了最大尝试次数，无法删除仿真平台仿真")
+                        await asyncio.sleep(attempt)
 
             await upload_file_service.delete_files_for_batch(
                 user_id=user_id,

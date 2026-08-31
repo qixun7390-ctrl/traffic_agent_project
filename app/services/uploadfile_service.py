@@ -17,6 +17,84 @@ REQUIRED_FILE_TYPE = {
     "bus_file",
 }
 
+LIST_JSON_FILE_TYPES = {
+    "map_file",
+    "stop_file",
+    "order_file",
+    "bus_file",
+}
+
+DICT_JSON_FILE_TYPES = {
+    "signal_file",
+}
+
+REQUIRED_ITEM_KEYS = {
+    "map_file": {"nds_id", "link_id", "link_coors", "start_coor", "end_coor"},
+    "stop_file": {"stop_id", "poi_id", "poi_lng", "poi_lat", "nds_id"},
+    "order_file": {
+        "device_id",
+        "available_pickup_stop_ids",
+        "available_dropoff_stop_ids",
+        "o_relative_time",
+        "passengers",
+    },
+    "bus_file": {
+        "vehicle_id",
+        "vehicle_speed",
+        "vehicle_capacity",
+        "vehicle_init_stop_id",
+    },
+}
+
+REQUIRED_SIGNAL_ITEM_KEYS = {"nds_id", "inter_id", "lights"}
+VALIDATION_SAMPLE_SIZE = 20
+
+
+def format_missing_keys(missing_keys: set[str]) -> str:
+    return ", ".join(sorted(missing_keys))
+
+
+def validate_list_items(file_type: str, payload: list) -> None:
+    required_keys = REQUIRED_ITEM_KEYS[file_type]
+
+    for index, item in enumerate(payload[:VALIDATION_SAMPLE_SIZE], start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"{file_type} 第 {index} 条数据必须是 JSON 对象")
+
+        missing_keys = required_keys - item.keys()
+        if missing_keys:
+            raise ValueError(
+                f"{file_type} 内容结构不正确，缺少字段: {format_missing_keys(missing_keys)}"
+            )
+
+
+def validate_signal_items(payload: dict) -> None:
+    for key, item in list(payload.items())[:VALIDATION_SAMPLE_SIZE]:
+        if not isinstance(item, dict):
+            raise ValueError(f"signal_file 中 {key} 对应的数据必须是 JSON 对象")
+
+        missing_keys = REQUIRED_SIGNAL_ITEM_KEYS - item.keys()
+        if missing_keys:
+            raise ValueError(
+                f"signal_file 内容结构不正确，缺少字段: {format_missing_keys(missing_keys)}"
+            )
+
+
+def validate_json_payload(file_type: str, payload) -> None:
+    if file_type in LIST_JSON_FILE_TYPES:
+        if not isinstance(payload, list) or not payload:
+            raise ValueError(f"{file_type} 内容结构不正确，应为非空 JSON 数组")
+        validate_list_items(file_type, payload)
+        return
+
+    if file_type in DICT_JSON_FILE_TYPES:
+        if not isinstance(payload, dict) or not payload:
+            raise ValueError(f"{file_type} 内容结构不正确，应为非空 JSON 对象")
+        validate_signal_items(payload)
+        return
+
+    raise ValueError(f"不支持的文件类型: {file_type}")
+
 class UploadFileService:
     def __init__(self, db:AsyncSession):
         self.db = db
@@ -145,7 +223,8 @@ class UploadFileService:
         if len(content) > settings.MAX_UPLOAD_FILE_SIZE:
             raise ValueError(f"{original_name} 文件过大，请检查上传文件是否正确")
         try:
-            json.loads(content.decode("utf-8"))
+            payload = json.loads(content.decode("utf-8"))
+            validate_json_payload(file_type, payload)
         except UnicodeDecodeError:
             raise ValueError(f"{original_name} 不是 UTF-8 编码文件")
         except json.JSONDecodeError:
