@@ -23,91 +23,45 @@ class SimulationAnalysisService:
             "simulation_duration": simulation_info.get("simulation_duration")
         }
 
-    async def get_order_summary(
+    async def get_created_order_count(
         self,
         simulation_id: int,
     ) -> dict:
-        order_log = await self.client.get_order_logs(
+         order_response = await self.client.get_order_logs(
+            simulation_id=simulation_id,
+    )
+         order_data = (
+             order_response.get("data",{}).get("order_data",{})
+         )
+
+         created_order_ids = {
+             int(order.get("order_id"))
+             for order in order_data
+             if order.get("order_id") is not None
+             and order.get("created_time") is not None
+         }
+
+         return {
+             "simulation_id": simulation_id,
+             "created_order_count": len(created_order_ids)
+         }
+
+    async def get_completed_order_count(
+        self,
+        simulation_id: int,
+    ) -> dict:
+        order_response = await self.client.get_order_logs(
             simulation_id=simulation_id,
         )
-        order_data = order_log.get("order_data",[])
-
-        created_order_count = len(order_data)
-        matched_order_count = sum(
-            1 for item in order_data
-            if item.get("matched_time") is not None
-        )
-
-        picked_order_count = sum(
-            1 for item in order_data
-            if item.get("pickup_time") is not None
-        )
-
-        completed_order_count = sum(
-            1 for item in order_data
-            if item.get("dropoff_time") is not None
-        )
-
-        match_rate = (
-            matched_order_count / created_order_count
-            if created_order_count
-            else 0
-        )
-
-        completion_rate = (
-            completed_order_count / created_order_count
-            if matched_order_count
-            else 0
-        )
-
-        return {
-            "simulation_id": simulation_id,
-            "created_order_count": created_order_count,
-            "matched_order_count": matched_order_count,
-            "picked_order_count": picked_order_count,
-            "completed_order_count": completed_order_count,
-            "match_rate": match_rate,
-            "completion_rate": completion_rate,
-            "total_revenue": order_log.get("total_revenue", 0),
+        order_data = order_response.get("data",{}).get("order_data",{})
+        completed_orders = {
+            int(order.get("order_id"))
+            for order in order_data
+            if order.get("order_id") is not None
+            and order.get("dropoff_time") is not None
         }
 
-    async def get_vehicle_summary(
-        self,
-        simulation_id: int,
-        time: int | None = None,
-    ) -> dict:
-        simulation_info = await self.client.get_simulation_info(
-            simulation_id=simulation_id,
-        )
-        vehicle_data = await self.client.get_vehicle_order_logs(
-            simulation_id=simulation_id,
-            time=time,
-        )
-        total_vehicles = simulation_info.get("total_vehicles") or len(vehicle_data)
-        active_vehicle_count = len(vehicle_data)
-
-        vehicle_with_completed_order_count = sum(
-            1 for item in vehicle_data
-            if item.get("orders_finished")
-        )
-
-        total_finished_orders = sum(
-            len(item.get("orders_finished") or [])
-            for item in vehicle_data
-        )
-
-        average_finished_orders_per_active_vehicle = (
-            total_finished_orders / active_vehicle_count
-            if active_vehicle_count else 0
-        )
-
         return {
             "simulation_id": simulation_id,
-            "time": time,
-            "total_vehicles": total_vehicles,
-            "active_vehicle_count": active_vehicle_count,
-            "idle_vehicle_count": max(total_vehicles - active_vehicle_count, 0),
-            "vehicles_with_completed_order_count": vehicle_with_completed_order_count,
-            "total_finished_orders": total_finished_orders,
-            "average_finished_orders_per_active_vehicle": average_finished_orders_per_active_vehicle,
+            "completed_order_count": len(completed_orders),
         }

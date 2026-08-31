@@ -111,6 +111,31 @@ class SimulationPlatformclient:
                 f"请求处理失败:{e}"
             )
 
+    async def get_simulations(self, sim_type: Optional[str] = None) -> List[SimulationResult]:
+        """获取所有仿真信息"""
+        params = {}
+        if sim_type:
+            params["type"] = sim_type
+        response = await self.make_request("GET", "/simulation/simulation/",params=params)
+        if response.get("message") == "Success":
+            simulations = []
+            for sim_data in response.get("data",[]):
+                sim = SimulationResult(
+                    simulation_id = sim_data.get("simulation_id"),
+                    name= sim_data.get("name"),
+                    type= sim_data.get("type"),
+                    area= sim_data.get("area"),
+                    status= sim_data.get("status"),
+                    created_time= sim_data.get("created_time"),
+                    end_time= sim_data.get("end_time"),
+                    simulation_duration= sim_data.get("simulation_duration", 0),
+                )
+                simulations.append(sim)
+            return simulations
+        else:
+            logger.error(f"获取仿真列表失败: {response}")
+            return []
+
     async def get_simulation_info(
         self,
         simulation_id: int,
@@ -134,73 +159,33 @@ class SimulationPlatformclient:
             logger.error(f"获取仿真信息失败:{response}")
             return {}
 
-    async def get_order_logs(
+    async def get_area_id(
         self,
-        simulation_id: int,
-        time: Optional[int] = None,
-    ) -> dict[str , Any]:
-        """获取指定仿真的订单信息"""
-        params = {}
-        if time is not None:
-            params["time"] = time
-
+        area_name: str,
+) -> int:
         response = await self.make_request(
             "GET",
-            f"/logs/order/{simulation_id}/",
-            params=params,
+            "/datamanager/area/",
         )
 
-        if response.get("message") == "Success":
-            return response.get("data", {})
-        logger.error(f"获取订单信息失败:{response}")
-        return {}
+        areas = response.get("results")
+        if not isinstance(areas,list):
+            areas = response.get("data",[])
 
-    async def get_vehicle_order_logs(
-        self,
-        simulation_id: int,
-        time: Optional[int] = None,
-    ) -> list[dict[str , Any]]:
-        """获取所有车辆的订单情况"""
-        params = {}
-        if time is not None:
-            params["time"] = time
+        if not isinstance(areas,list):
+            raise simulationPlatformError(
+                f"区域列表格式错误: {response}"
+            )
 
-        response = await self.make_request(
-            "GET",
-            f"/logs/vehicle/order/{simulation_id}/",
-            params=params,
+        for area in areas:
+            if not isinstance(area,dict):
+                continue
+            if area.get("name") == area_name:
+                return int(area["id"])
+
+        raise simulationPlatformError(
+            f"平台中不存在区域: {area_name}"
         )
-
-        if response.get("message") in {"Success", "查询成功"}:
-            data = response.get("data", [])
-            return data if isinstance(data, list) else []
-
-        logger.error(f"获取车辆订单完成情况失败: {response}")
-        return []
-
-    async def get_vehicle_order_detail(
-        self,
-        simulation_id: int,
-        vehicle_id: int,
-        time: Optional[int] = None,
-    ) -> dict[str, Any]:
-        """获取单个车辆的订单完成情况"""
-        params = {}
-        if time is not None:
-            params["time"] = time
-
-        response = await self.make_request(
-            "GET",
-            f"/logs/vehicle/order/{simulation_id}/{vehicle_id}",
-            params=params,
-        )
-
-        if response.get("message") in {"Success", "查询成功"}:
-            data = response.get("data", {})
-            return data if isinstance(data, dict) else {}
-
-        logger.error(f"获取单个车辆的订单完成情况失败: {response}")
-        return {}
 
     async def create_area(
         self,
@@ -423,6 +408,82 @@ class SimulationPlatformclient:
             )
         return int(simulation_id)
 
+    async def get_status_logs(
+        self,
+        simulation_id: int,
+        pages: list[int] | None = None,
+    ) -> dict[str,Any]:
+        """
+        获取状态事件日志
+        对应:
+        GET /logs/status/{simulation_id}
+        """
+
+        if simulation_id <= 0:
+            raise ValueError(
+                "simulation_id必须大于0"
+            )
+        params = {}
+        if pages:
+            for page in pages:
+                if page <= 0:
+                    raise ValueError(
+                        f"页码必须大于0:{page}"
+                    )
+            params["pages"] = ",".join(
+                map(str,pages)
+            )
+
+        response = await self.make_request(
+            "GET",
+            f"/logs/status/{simulation_id}/",
+            params = params,
+        )
+
+        data = response.get("data")
+        if not isinstance(data,list):
+            raise simulationPlatformError(
+                f"状态日志响应缺少data数组:{response}"
+            )
+
+        return response
+
+    async def get_position_logs(
+        self,
+        simulation_id: int,
+        pages: list[int] | None = None,
+    ) -> dict[str,Any]:
+        f"""
+        获取车辆位置日志
+        对应:
+            GET /api/logs/position/{simulation_id}
+        """
+        if simulation_id <= 0:
+            raise ValueError(
+                "simulation_id必须大于0"
+            )
+        params = {}
+        if pages:
+            for page in pages:
+                if page <= 0:
+                    raise ValueError(
+                        f"页码必须大于0:{page}"
+                    )
+            params["pages"] = ",".join(
+                map(str,pages)
+            )
+        response = await self.make_request(
+            "GET",
+            f"/logs/position/{simulation_id}/",
+            params = params,
+        )
+        data = response.get("data")
+        if not isinstance(data,list):
+            raise simulationPlatformError(
+                f"位置日志响应缺少data数组:{response}"
+            )
+        return response
+
     async def delete_simulation(
         self,
         simulation_id: str
@@ -446,3 +507,28 @@ class SimulationPlatformclient:
         )
         return response
 
+    async def get_order_logs(
+        self,
+        simulation_id: int,
+        time: float | None = None,
+    ) -> dict[str,Any]:
+        """获取所有订单的完成情况"""
+        params = {}
+        if time is not None:
+            params["time"] = str(time)
+        response = await self.make_request(
+            "GET",
+            f"/logs/order/{simulation_id}/",
+            params=params
+        )
+        data = response.get("data")
+        if not isinstance(data,dict):
+            raise simulationPlatformError(
+                f"订单日志响应缺少data对象:{response}"
+            )
+        order_data = data.get("order_data")
+        if not isinstance(order_data, list):
+            raise simulationPlatformError(
+                f"订单日志响应缺少data.order_data数组:{response}"
+            )
+        return response

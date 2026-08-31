@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Literal
 import re
 from app.agent.state import TrafficAgentState
-from langchain_core.messages import HumanMessage,SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
 from uuid import UUID
 
@@ -42,34 +42,22 @@ INTENT_SYSTEM_PROMPT = """
 
 
 QUERY_AGENT_SYSTEM_PROMPT = """
-你是交通仿真查询助手，采用 ReAct 思路工作。
+你是交通仿真查询助手。
 
-你的工作方式：
-1. 先理解用户问题和已抽取参数。
-2. 根据 metrics 选择必要工具。
-3. 工具返回结果后，基于工具结果回答用户。
-4. 如果已经拿到足够结果，直接总结，不要重复调用同一个工具。
+你可以使用工具查询仿真信息。
 
-当前可用工具：
-- get_simulation_duration：查询仿真运行时长。
-- get_simulation_order_summary：查询订单创建数、匹配数、上车数、完成数、匹配率、完成率。
-- get_simulation_vehicle_summary：查询车辆总数、活跃车辆数、空闲车辆数、完成过订单的车辆数、总完成订单数、平均每辆活跃车完成订单数。
+当前可用能力：
+1. 查询仿真运行时长
+2. 查询创建订单数
+3. 查询完成订单数
 
-工具选择规则：
-- metrics 包含 duration，只调用 get_simulation_duration。
-- metrics 包含 order_summary，只调用 get_simulation_order_summary。
-- metrics 包含 vehicle_summary，只调用 get_simulation_vehicle_summary。
-- metrics 同时包含多个指标，可以调用多个工具。
-- 不要调用 metrics 之外的工具。
-- 同一个工具最多调用一次。
+如果用户问“某个仿真跑多久了、创建多少订单、完成多少订单”，
+你应该分别调用对应工具。
+回答用户时要简洁，说明查询到的关键数字。
+然后如果你已经收到工具返回结果，请直接总结回答用户，不要重复调用同一个工具。
 
-回答规则：
-- 回答必须基于工具返回结果。
-- 不要编造没有返回的字段。
-- 如果工具返回为空或缺少关键字段，要说明“当前没有查询到对应数据”。
-- 数字尽量直接给出。
-- 百分比可以用小数换算成百分比展示。
-- 回答简洁，不要暴露内部 JSON。
+只调用 metrics 中需要的工具。
+如果 metrics 中没有某个指标，不要调用对应工具。
 """
 
 QUERY_PARAMS_SYSTEM_PROMPT = """
@@ -83,29 +71,23 @@ QUERY_PARAMS_SYSTEM_PROMPT = """
 - 如果用户说“刚刚那个 / 上一个 / 这个 / 那条仿真”，必须结合上文摘要中的最近一次成功仿真来判断 simulation_id。
 - 如果上文摘要里明确给出了最近成功仿真的 simulation_id，而用户没有重新指定新的 simulation_id，就直接使用那个值。
 - 如果用户明确说了某个 simulation_id，以用户新输入为准。
-
-metrics 只能从下面选择：
-- duration
-- order_summary
-- vehicle_summary
-
-选择规则：
-- 用户问“跑了多久 / 仿真时长 / 运行时长”，选择 duration。
-- 用户问“创建多少订单 / 匹配多少订单 / 完成多少订单 / 订单完成率 / 订单整体情况”，选择 order_summary。
-- 用户问“多少辆车 / 车辆完成情况 / 活跃车辆 / 空闲车辆 / 平均每辆车完成多少单”，选择 vehicle_summary。
-- 用户问“整体情况 / 整体效果 / 仿真结果怎么样”，选择 duration、order_summary、vehicle_summary。
-- 不要选择用户没有问到的指标，除非用户问整体情况。
+- metrics 只能从下面选择：
+  - duration
+  - created_order_count
+  - completed_order_count
+- 如果用户问“跑了多久”，选 duration。
+- 如果用户问“创建了多少订单”，选 created_order_count。
+- 如果用户问“完成了多少订单”，选 completed_order_count。
+- 如果用户问整体情况，可以三个都选。
 
 你只返回 JSON，不要解释。
 
 返回格式：
 {
   "simulation_id": 283,
-  "metrics": ["duration", "order_summary", "vehicle_summary"]
+  "metrics": ["duration", "created_order_count", "completed_order_count"]
 }
-"""
-
-CREATE_PARAMS_SYSTEM_PROMPT = """
+"""`r`n`r`nCREATE_PARAMS_SYSTEM_PROMPT = """
 你是交通仿真创建参数抽取器。
 
 从用户自然语言中抽取创建仿真的参数：
@@ -211,24 +193,17 @@ def build_query_agent_node(
     async def query_agent_node(
         state: TrafficAgentState,
     ) -> dict[str, Any]:
-        request_params = state.get("request_params", {})
-        history_context = state.get("history_context")
-
-        system_content = (
-                QUERY_AGENT_SYSTEM_PROMPT
-                + "\n\n已抽取参数：\n"
-                + json.dumps(request_params, ensure_ascii=False)
-                + "\n请只调用 metrics 中需要的查询工具"
-        )
-
-        if history_context:
-            system_content += "\n\n历史摘要：\n" + history_context
+        request_params = state.get("request_params",{})
 
         messages = [
-            SystemMessage(content=system_content),
-            *state.get("messages", [])
+            SystemMessage(
+                content=QUERY_AGENT_SYSTEM_PROMPT
+                + "\n\n已抽取参数：\n"
+                + json.dumps(request_params,ensure_ascii=False)
+                + "\n请只调用 metrics 中需要的查询工具"
+            ),
+            *state.get("messages",[])
         ]
-
         response = await model_with_tools.ainvoke(messages)
         tool_calls = getattr(response,"tool_calls",[]) or []
         return {
@@ -536,8 +511,8 @@ async def extract_query_params_node(
 
     allowd_metrics = {
         "duration",
-        "order_summary",
-        "vehicle_summary",
+        "created_order_count",
+        "completed_order_count",
     }
     if not isinstance(metrics,list):
         metrics = []
@@ -549,8 +524,8 @@ async def extract_query_params_node(
     if not metrics:
         metrics = [
             "duration",
-            "order_summary",
-            "vehicle_summary",
+            "created_order_count",
+            "completed_order_count",
         ]
     return {
         "request_params": {
